@@ -271,3 +271,303 @@ print(f'Max diff: {diff.max()}, Mean diff: {diff.mean():.4f}')
 print('PASS' if diff.max() < 2 else 'FAIL')
 "
 ```
+
+---
+
+## Qwen3 Text Encoder Implementation Plan
+
+This section documents the plan to implement native text encoding so that `-p "a car"` works directly without pre-computed embeddings.
+
+### Reference Code
+Official implementation: `flux2/src/flux2/text_encoder.py` (Qwen3Embedder class, lines 366-428)
+
+### Architecture Overview
+
+**Model**: Qwen3-4B (hidden_dim=2560, since 3×2560=7680=context_in_dim for Klein4B)
+- HuggingFace model: `Qwen/Qwen3-4B` (or `Qwen/Qwen3-4B-FP8` for quantized)
+- Architecture: Standard decoder-only transformer (causal LM)
+- Vocab size: ~151,936 tokens
+- Layers: 36
+- Hidden dim: 2560
+- Heads: 20
+- Head dim: 128
+
+**Output extraction**:
+- Extract hidden states from layers [9, 18, 27] (0-indexed)
+- Stack along new dimension: `[3, seq_len, 2560]`
+- Reshape to `[seq_len, 7680]` (concatenate layer outputs)
+
+### Tokenization Process
+
+From official code (`Qwen3Embedder.forward`, lines 383-419):
+
+```python
+# 1. Format as chat message
+messages = [{"role": "user", "content": prompt}]
+
+# 2. Apply chat template
+text = tokenizer.apply_chat_template(
+    messages,
+    tokenize=False,
+    add_generation_prompt=True,
+    enable_thinking=False,  # Qwen3-specific: disable CoT
+)
+
+# 3. Tokenize with padding
+model_inputs = tokenizer(
+    text,
+    return_tensors="pt",
+    padding="max_length",
+    truncation=True,
+    max_length=512,
+)
+```
+
+**Chat template format** (Qwen3):
+```
+<|im_start|>user
+{prompt}<|im_end|>
+<|im_start|>assistant
+```
+
+### Forward Pass
+
+```python
+output = model(
+    input_ids=input_ids,          # [batch, 512]
+    attention_mask=attention_mask, # [batch, 512]
+    output_hidden_states=True,
+    use_cache=False,
+)
+
+# Extract layers 9, 18, 27 (0-indexed, so hidden_states[10], [19], [28])
+# hidden_states[0] is embeddings, [1] is after layer 0, etc.
+out = torch.stack([
+    output.hidden_states[10],  # After layer 9
+    output.hidden_states[19],  # After layer 18
+    output.hidden_states[28],  # After layer 27
+], dim=1)  # [batch, 3, seq_len, 2560]
+
+# Reshape: b c l d -> b l (c d)
+out = rearrange(out, "b c l d -> b l (c d)")  # [batch, 512, 7680]
+```
+
+### Text Position IDs
+
+From `flux2/src/flux2/sampling.py` (prc_txt function, lines 93-103):
+
+```python
+def prc_txt(x: Tensor, t_coord=None):
+    _l, _ = x.shape  # seq_len, hidden_dim
+    coords = {
+        "t": torch.arange(1) if t_coord is None else t_coord,  # T=0
+        "h": torch.arange(1),  # H=0 (dummy)
+        "w": torch.arange(1),  # W=0 (dummy)
+        "l": torch.arange(_l), # L=0,1,2,...,seq_len-1
+    }
+    x_ids = torch.cartesian_prod(coords["t"], coords["h"], coords["w"], coords["l"])
+    return x, x_ids.to(x.device)
+```
+
+**Result**: For each text token at position `i`:
+- Position ID = `(T=0, H=0, W=0, L=i)`
+- Shape: `[seq_len, 4]`
+
+This means text tokens only get RoPE rotation on axis 3 (L dimension), while axes 0,1,2 have position 0 (identity rotation).
+
+### Implementation Steps
+
+#### Phase 1: Tokenizer (flux_tokenizer.c)
+
+1. **Load vocabulary** from `text_encoder/tokenizer.json`:
+   - Parse JSON to extract token→id mapping
+   - Store as hash table for O(1) lookup
+   - Handle special tokens: `<|im_start|>`, `<|im_end|>`, `<|endoftext|>`
+
+2. **Implement BPE tokenization**:
+   - Load merges from `text_encoder/merges.txt` (or tokenizer.json)
+   - Implement byte-pair encoding algorithm
+   - Handle UTF-8 properly (Qwen uses byte-level BPE)
+
+3. **Chat template application**:
+   ```c
+   // Format: <|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n
+   int flux_apply_chat_template(int *output_ids, int max_len,
+                                 const char *prompt,
+                                 flux_tokenizer_t *tok);
+   ```
+
+4. **Padding**:
+   - Pad to max_length=512 with pad_token_id
+   - Generate attention_mask (1 for real tokens, 0 for padding)
+
+#### Phase 2: Qwen3 Model Architecture (flux_qwen3.c)
+
+**Layers to implement**:
+
+1. **Embedding layer**:
+   - `embed_tokens`: [vocab_size, 2560] lookup table
+   - Input: token IDs → Output: [seq_len, 2560]
+
+2. **RMSNorm** (used throughout):
+   ```c
+   // Qwen3 uses RMSNorm, not LayerNorm
+   void qwen3_rms_norm(float *out, const float *x, const float *weight,
+                       int seq_len, int hidden_dim, float eps);
+   ```
+
+3. **Attention layer** (for each of 36 layers):
+   - q_proj: [2560, 2560]
+   - k_proj: [2560, 512] (GQA: 4 KV heads × 128 dim)
+   - v_proj: [2560, 512]
+   - o_proj: [2560, 2560]
+   - RoPE on Q and K
+   - Grouped Query Attention (GQA): 20 query heads, 4 KV heads
+
+4. **MLP layer** (for each of 36 layers):
+   - gate_proj: [2560, 6912]
+   - up_proj: [2560, 6912]
+   - down_proj: [6912, 2560]
+   - Activation: SiLU(gate) * up
+
+5. **Forward pass structure**:
+   ```c
+   for (int layer = 0; layer < 36; layer++) {
+       // Pre-norm
+       rms_norm(normed, hidden, layer_norm_weight, ...);
+
+       // Self-attention
+       attention_forward(attn_out, normed, layer, ...);
+       hidden = hidden + attn_out;  // Residual
+
+       // Pre-norm for MLP
+       rms_norm(normed, hidden, post_attn_norm_weight, ...);
+
+       // MLP
+       mlp_forward(mlp_out, normed, layer, ...);
+       hidden = hidden + mlp_out;  // Residual
+
+       // Save hidden state if layer in [9, 18, 27]
+       if (layer == 9 || layer == 18 || layer == 27) {
+           memcpy(saved_hidden[save_idx++], hidden, ...);
+       }
+   }
+   ```
+
+#### Phase 3: Weight Loading (flux_qwen3.c)
+
+**Weight files**: `text_encoder/model*.safetensors`
+
+Weight naming convention:
+```
+model.embed_tokens.weight                    [151936, 2560]
+model.layers.{i}.self_attn.q_proj.weight     [2560, 2560]
+model.layers.{i}.self_attn.k_proj.weight     [512, 2560]
+model.layers.{i}.self_attn.v_proj.weight     [512, 2560]
+model.layers.{i}.self_attn.o_proj.weight     [2560, 2560]
+model.layers.{i}.mlp.gate_proj.weight        [6912, 2560]
+model.layers.{i}.mlp.up_proj.weight          [6912, 2560]
+model.layers.{i}.mlp.down_proj.weight        [2560, 6912]
+model.layers.{i}.input_layernorm.weight      [2560]
+model.layers.{i}.post_attention_layernorm.weight [2560]
+model.norm.weight                            [2560]
+```
+
+**Memory estimate**:
+- Embeddings: 151936 × 2560 × 4 = ~1.5 GB
+- Per layer: ~80 MB (attention + MLP weights)
+- 36 layers: ~2.9 GB
+- **Total: ~4.4 GB** (FP32), ~2.2 GB (FP16), ~1.1 GB (INT8)
+
+#### Phase 4: Integration (flux.c, main.c)
+
+1. **API additions**:
+   ```c
+   // Load text encoder
+   flux_text_encoder_t *flux_text_encoder_load(const char *model_dir);
+   void flux_text_encoder_free(flux_text_encoder_t *enc);
+
+   // Encode text to embeddings
+   float *flux_encode_text(flux_text_encoder_t *enc,
+                           const char *prompt,
+                           int *out_seq_len);
+   ```
+
+2. **Modify flux_generate()**:
+   ```c
+   // If prompt provided, encode it
+   if (prompt != NULL && ctx->text_encoder != NULL) {
+       text_emb = flux_encode_text(ctx->text_encoder, prompt, &text_seq);
+   } else if (external_emb != NULL) {
+       text_emb = external_emb;
+       text_seq = external_seq;
+   } else {
+       // Use null embeddings (current behavior)
+   }
+   ```
+
+3. **CLI changes** (main.c):
+   - `-p/--prompt` triggers text encoding
+   - `-e/--embeddings` for pre-computed (kept for compatibility)
+   - If both provided, `-p` takes precedence
+
+### Optimization Considerations
+
+1. **Memory**: Qwen3-4B needs ~4.4 GB for weights
+   - Consider INT8 quantization (1.1 GB)
+   - Could use memory-mapped weights (mmap)
+
+2. **Speed**: Text encoding is one-time per generation
+   - 36 layers × 512 tokens is manageable
+   - Main bottleneck is image generation, not text encoding
+
+3. **KV Cache**: Not needed since we only do one forward pass (no autoregressive generation)
+
+### File Structure
+
+```
+flux_qwen3.h        - Public API
+flux_qwen3.c        - Model implementation
+flux_tokenizer.c    - Update for Qwen3 tokenizer (currently has placeholder)
+```
+
+### Testing Plan
+
+1. **Unit test tokenization**:
+   - Compare token IDs with HuggingFace tokenizer
+   - Test special characters, Unicode, long prompts
+
+2. **Unit test model output**:
+   - Save Python embeddings for test prompts
+   - Compare C embeddings (should match within FP32 precision)
+
+3. **End-to-end test**:
+   - Generate image with `-p "a red car"`
+   - Visually verify image shows a red car
+   - Compare with Python-generated image using same prompt
+
+### Dependencies
+
+- None beyond current (pure C + BLAS)
+- tokenizer.json parsing needs JSON parser (can use simple custom parser)
+
+### Estimated Effort
+
+- Phase 1 (Tokenizer): 2-3 days
+- Phase 2 (Model): 3-4 days
+- Phase 3 (Weights): 1 day
+- Phase 4 (Integration): 1 day
+- Testing & debugging: 2-3 days
+- **Total: ~10-14 days**
+
+### Open Questions
+
+1. **Qwen3 variant**: Need to verify which exact variant Klein4B uses
+   - Check `text_encoder/config.json` for hidden_size
+   - 2560 → Qwen3-4B, 4096 → Qwen3-8B
+
+2. **Quantization**: Should we support INT8/FP16 from the start?
+   - FP32 is simpler but uses 4.4 GB RAM
+
+3. **GQA implementation**: Grouped Query Attention is slightly different from standard MHA
+   - 20 query heads share 4 KV heads (5:1 ratio)
