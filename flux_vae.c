@@ -168,10 +168,11 @@ static void resblock_forward(float *out, const float *x,
 }
 
 /* Apply self-attention block */
-static void attnblock_forward(float *out, const float *x,
-                              const vae_attnblock_t *block,
-                              float *work, int batch, int H, int W,
-                              int num_groups, float eps) {
+/* Returns 0 on success, -1 on OOM */
+static int attnblock_forward(float *out, const float *x,
+                             const vae_attnblock_t *block,
+                             float *work, int batch, int H, int W,
+                             int num_groups, float eps) {
     int ch = block->channels;
     int spatial = H * W;
 
@@ -208,7 +209,17 @@ static void attnblock_forward(float *out, const float *x,
         float *k_t = (float *)malloc(spatial * ch * sizeof(float));
         float *v_t = (float *)malloc(spatial * ch * sizeof(float));
         float *o_t = (float *)malloc(spatial * ch * sizeof(float));
-        float *scores = (float *)malloc(spatial * spatial * sizeof(float));
+        float *scores = (float *)malloc((size_t)spatial * spatial * sizeof(float));
+
+        /* Check for allocation failures */
+        if (!q_t || !k_t || !v_t || !o_t || !scores) {
+            free(q_t);
+            free(k_t);
+            free(v_t);
+            free(o_t);
+            free(scores);
+            return -1;  /* OOM */
+        }
 
         /* Transpose [C, HW] -> [HW, C] */
         for (int c = 0; c < ch; c++) {
@@ -248,6 +259,7 @@ static void attnblock_forward(float *out, const float *x,
 
     /* Add residual */
     flux_add(out, x, work, batch * ch * spatial);
+    return 0;
 }
 
 /* ========================================================================
@@ -308,8 +320,10 @@ float *flux_vae_encode(flux_vae_t *vae, const float *img,
     /* Mid block: resblock -> attn -> resblock */
     resblock_forward(work, x, &vae->enc_mid_block1, vae->work3,
                      batch, cur_h, cur_w, vae->num_groups, vae->eps);
-    attnblock_forward(x, work, &vae->enc_mid_attn, vae->work3,
-                      batch, cur_h, cur_w, vae->num_groups, vae->eps);
+    if (attnblock_forward(x, work, &vae->enc_mid_attn, vae->work3,
+                          batch, cur_h, cur_w, vae->num_groups, vae->eps) < 0) {
+        return NULL;  /* OOM in attention */
+    }
     resblock_forward(work, x, &vae->enc_mid_block2, vae->work3,
                      batch, cur_h, cur_w, vae->num_groups, vae->eps);
     flux_copy(x, work, batch * mid_ch * cur_h * cur_w);
@@ -411,8 +425,10 @@ flux_image *flux_vae_decode(flux_vae_t *vae, const float *latent,
     /* Mid block: resblock -> attn -> resblock */
     resblock_forward(work, x, &vae->dec_mid_block1, vae->work3,
                      batch, cur_h, cur_w, vae->num_groups, vae->eps);
-    attnblock_forward(x, work, &vae->dec_mid_attn, vae->work3,
-                      batch, cur_h, cur_w, vae->num_groups, vae->eps);
+    if (attnblock_forward(x, work, &vae->dec_mid_attn, vae->work3,
+                          batch, cur_h, cur_w, vae->num_groups, vae->eps) < 0) {
+        return NULL;  /* OOM in attention */
+    }
     resblock_forward(work, x, &vae->dec_mid_block2, vae->work3,
                      batch, cur_h, cur_w, vae->num_groups, vae->eps);
     flux_copy(x, work, batch * mid_ch * cur_h * cur_w);
