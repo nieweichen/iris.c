@@ -584,8 +584,8 @@ qwen3_tokenizer_t *qwen3_tokenizer_load(const char *tokenizer_json_path) {
 
     free(json);
 
-    fprintf(stderr, "Loaded Qwen3 tokenizer: %d vocab, %d merges\n",
-            tok->vocab_size, tok->num_merges);
+    fprintf(stderr, " Qwen3 tokenizer loaded (%d vocab)",
+            tok->vocab_size);
 
     return tok;
 

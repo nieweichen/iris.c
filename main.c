@@ -103,6 +103,12 @@ static void cli_phase_callback(const char *phase, int done) {
     if (output_level == OUTPUT_QUIET) return;
 
     if (!done) {
+        /* If we were showing step progress, end that line first */
+        if (cli_current_step > 0) {
+            fprintf(stderr, "\n");
+            cli_current_step = 0;
+        }
+
         /* Phase starting */
         cli_current_phase = phase;
         cli_phase_start = clock();

@@ -436,7 +436,6 @@ float *qwen3_forward(qwen3_model_t *model, const int *input_ids,
             fflush(stderr);
         }
     }
-    fprintf(stderr, "\n");
 
     /* Concatenate outputs from layers 9, 18, 27 -> [seq_len, 7680] */
     float *output = malloc(seq_len * QWEN3_TEXT_DIM * sizeof(float));
@@ -550,8 +549,6 @@ qwen3_model_t *qwen3_model_load(const char *model_dir) {
         return NULL;
     }
 
-    fprintf(stderr, "Loading Qwen3 model...\n");
-
     /* Load embedding weights */
     int hidden = QWEN3_HIDDEN_SIZE;
     model->embed_tokens = load_tensor(files, 2, "model.embed_tokens.weight");
@@ -559,19 +556,14 @@ qwen3_model_t *qwen3_model_load(const char *model_dir) {
         fprintf(stderr, "qwen3_model_load: failed to load embed_tokens\n");
         goto error;
     }
-    fprintf(stderr, "  Loaded embeddings\n");
 
     /* Load layer weights */
     for (int i = 0; i < model->num_layers; i++) {
         load_layer_weights(&model->layers[i], files, 2, i);
-        if ((i + 1) % 6 == 0) {
-            fprintf(stderr, "  Loaded layer %d/%d\n", i + 1, model->num_layers);
-        }
     }
 
     /* Load final norm */
     model->norm_weight = load_tensor(files, 2, "model.norm.weight");
-    fprintf(stderr, "  Loaded final norm\n");
 
     safetensors_close(files[0]);
     safetensors_close(files[1]);
@@ -607,7 +599,6 @@ qwen3_model_t *qwen3_model_load(const char *model_dir) {
         model->layer_outputs[i] = malloc(seq_len * hidden * sizeof(float));
     }
 
-    fprintf(stderr, "Qwen3 model loaded successfully\n");
     return model;
 
 error:
@@ -720,7 +711,6 @@ float *qwen3_encode_text(qwen3_encoder_t *enc, const char *prompt) {
     }
 
     /* Forward pass */
-    fprintf(stderr, "Running text encoder");
     float *embeddings = qwen3_forward(enc->model, padded_tokens, attention_mask, QWEN3_MAX_SEQ_LEN);
 
     free(padded_tokens);
