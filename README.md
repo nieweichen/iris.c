@@ -1,6 +1,6 @@
 # FLUX.2-klein-4B Pure C Implementation
 
-Generate images from text prompts using FLUX.2-klein-4B, implemented entirely in C with zero external dependencies beyond the C standard library and BLAS.
+Generate images from text prompts using FLUX.2-klein-4B, implemented entirely in C with zero external dependencies beyond the C standard library. BLAS acceleration is optional but recommended.
 
 ## Quick Start
 
@@ -26,7 +26,7 @@ That's it. No Python runtime, no PyTorch, no CUDA toolkit required at inference 
 
 ## Features
 
-- **Zero dependencies**: Pure C implementation, only needs BLAS (Apple Accelerate on macOS, OpenBLAS on Linux)
+- **Zero dependencies**: Pure C implementation, works standalone. BLAS optional for ~30x speedup (Apple Accelerate on macOS, OpenBLAS on Linux)
 - **Metal GPU acceleration**: Automatic on Apple Silicon Macs
 - **Text-to-image**: Generate images from text prompts
 - **Image-to-image**: Transform existing images guided by prompts
