@@ -274,11 +274,6 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Size: %dx%d\n", params.width, params.height);
         fprintf(stderr, "Steps: %d\n", params.num_steps);
         fprintf(stderr, "Guidance: %.2f\n", params.guidance_scale);
-        if (params.seed >= 0) {
-            fprintf(stderr, "Seed: %lld\n", (long long)params.seed);
-        } else {
-            fprintf(stderr, "Seed: random\n");
-        }
         if (input_path) {
             fprintf(stderr, "Input: %s\n", input_path);
             fprintf(stderr, "Strength: %.2f\n", params.strength);
@@ -308,12 +303,17 @@ int main(int argc, char *argv[]) {
         cli_setup_progress();
     }
 
-    /* Set seed */
+    /* Set seed - if random, capture the actual seed used for reproducibility */
+    int64_t actual_seed;
     if (params.seed >= 0) {
-        flux_set_seed(params.seed);
+        actual_seed = params.seed;
     } else {
-        flux_set_seed(time(NULL));
+        actual_seed = (int64_t)time(NULL);
     }
+    flux_set_seed(actual_seed);
+
+    /* Always print the seed so runs can be reproduced */
+    fprintf(stderr, "Seed: %lld\n", (long long)actual_seed);
 
     /* Generate image */
     flux_image *output = NULL;
