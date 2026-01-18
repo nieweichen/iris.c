@@ -215,17 +215,46 @@ After conv BLAS:      ~24s total (Transformer=22s, VAE=0.1s)
 
 When running with `-v` (verbose mode), the inference shows fine-grained progress:
 ```
-Step 1... dddddssssF
-Step 2... dddddssssF
+Step 1/2 dddddssssF
+Step 2/2 dddddssssF
 ```
 
-Progress characters:
+Progress characters (CLI-specific):
 - `d` = Double-stream block completed (5 total per step)
 - `s` = 5 single-stream blocks completed (4 groups of 5 = 20 total)
 - `F` = Final layer completed
 
-The progress callback is set via `flux_set_verbose(1)` and uses the global
-`flux_substep_callback` which is called from `flux_transformer_forward`.
+### Callback Architecture
+
+The library provides headless callbacks (no printing); all formatting is CLI-side.
+
+**Library callbacks** (flux_kernels.h):
+```c
+typedef enum {
+    FLUX_SUBSTEP_DOUBLE_BLOCK,
+    FLUX_SUBSTEP_SINGLE_BLOCK,
+    FLUX_SUBSTEP_FINAL_LAYER,
+} flux_substep_type_t;
+
+extern flux_substep_callback_t flux_substep_callback;  // (type, index, total)
+extern flux_step_callback_t flux_step_callback;        // (step, total)
+```
+
+**CLI implementation** (main.c):
+- `cli_step_callback`: prints "Step N/M " with appropriate newlines
+- `cli_substep_callback`: prints d/s/F characters based on substep type
+
+**Usage**: Set callbacks before generation, clear after:
+```c
+flux_step_callback = cli_step_callback;
+flux_substep_callback = cli_substep_callback;
+// ... generation ...
+flux_step_callback = NULL;
+flux_substep_callback = NULL;
+```
+
+This design enables GUI integration - the GUI can set its own callbacks to update
+progress bars, etc., without any library-side printing.
 
 ## Test Verification
 Reference image: test_vectors/reference_1step_64x64_seed42.png
