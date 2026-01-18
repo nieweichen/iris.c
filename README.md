@@ -43,6 +43,8 @@ Options:
 
 ## Current Limitations
 
+**Maximum resolution**: 1024x1024 pixels. Higher resolutions require prohibitive memory for the attention mechanisms (VAE attention alone needs ~17GB for the scores matrix at 2048x2048).
+
 **No text encoder**: The Qwen3 text encoder (~8GB) is not yet implemented. To generate images, you must provide pre-computed text embeddings via the `-e` option. These can be generated using the Python diffusers library:
 
 ```python
