@@ -312,6 +312,62 @@ void flux_metal_cleanup(void) {
     }
 }
 
+/* Forward declaration - defined after f16 cache variables */
+static void clear_f16_cache(void);
+
+void flux_metal_reset(void) {
+    if (!g_initialized) return;
+
+    @autoreleasepool {
+        /* Wait for any pending GPU work */
+        flux_metal_sync();
+
+        /* End any pending batch */
+        if (g_in_batch) {
+            flux_metal_end_batch();
+        }
+
+        /* End any pending tensor batch or chain via the public APIs
+         * (they check mode flags internally and are safe to call) */
+        flux_gpu_batch_end();
+        flux_gpu_chain_end();
+
+        /* Clear all caches */
+        clear_weight_cache();
+        clear_f16_cache();
+        clear_activation_pool();
+
+        /* Clear batch input cache */
+        pthread_mutex_lock(&g_cache_mutex);
+        g_batch_input_count = 0;
+        pthread_mutex_unlock(&g_cache_mutex);
+
+        /* Clear pending outputs */
+        g_pending_count = 0;
+
+        /* Note: Device, queue, and pipelines are preserved */
+    }
+}
+
+/* Debug: Clear only specific caches (for isolating issues) */
+void flux_metal_clear_weight_cache_only(void) {
+    if (!g_initialized) return;
+    flux_metal_sync();
+    clear_weight_cache();
+}
+
+void flux_metal_clear_f16_cache_only(void) {
+    if (!g_initialized) return;
+    flux_metal_sync();
+    clear_f16_cache();
+}
+
+void flux_metal_clear_activation_pool_only(void) {
+    if (!g_initialized) return;
+    flux_metal_sync();
+    clear_activation_pool();
+}
+
 /* ========================================================================
  * Batch Execution Functions
  * ======================================================================== */
@@ -538,6 +594,17 @@ typedef struct {
 static f16_cache_entry_t g_f16_cache[F16_WEIGHT_CACHE_SIZE];
 static int g_f16_cache_count = 0;
 static pthread_mutex_t g_f16_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Clear f16 weight cache (bf16 converted to f16) */
+static void clear_f16_cache(void) {
+    pthread_mutex_lock(&g_f16_cache_mutex);
+    for (int i = 0; i < g_f16_cache_count; i++) {
+        g_f16_cache[i].gpu_buffer = nil;
+        g_f16_cache[i].cpu_ptr = NULL;
+    }
+    g_f16_cache_count = 0;
+    pthread_mutex_unlock(&g_f16_cache_mutex);
+}
 
 /* Get bf16 weights as f16 buffer for MPS */
 static id<MTLBuffer> get_cached_bf16_as_f16_buffer(const uint16_t *weights, size_t num_elements) {
@@ -799,7 +866,11 @@ void flux_metal_sgemm_batch(int transpose_a, int transpose_b,
 }
 
 void flux_metal_sync(void) {
-    /* All operations are currently synchronous */
+    /* This is a legacy no-op function. Actual GPU synchronization is handled by:
+     * - flux_gpu_sync() for tensor operations (g_tensor_cmd)
+     * - flux_metal_end_batch() for batch operations (g_batch_cmd)
+     * - flux_gpu_chain_end() for chain operations (g_chain_cmd)
+     * These are called explicitly where needed (e.g., at end of transformer forward). */
 }
 
 size_t flux_metal_memory_used(void) {

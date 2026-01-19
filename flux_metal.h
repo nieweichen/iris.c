@@ -33,6 +33,19 @@ int flux_metal_available(void);
 void flux_metal_cleanup(void);
 
 /*
+ * Reset all GPU state (caches, pools, pending commands).
+ * Call this between independent inference phases (e.g., after text encoding,
+ * before loading transformer) to ensure clean GPU state.
+ * Device and pipelines are preserved; only data buffers are cleared.
+ */
+void flux_metal_reset(void);
+
+/* Debug: Clear only specific caches (for isolating issues) */
+void flux_metal_clear_weight_cache_only(void);
+void flux_metal_clear_f16_cache_only(void);
+void flux_metal_clear_activation_pool_only(void);
+
+/*
  * GPU-accelerated matrix multiplication using MPS.
  * C[M,N] = alpha * A[M,K] @ B[K,N] + beta * C[M,N]
  *

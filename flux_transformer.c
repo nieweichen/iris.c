@@ -1953,6 +1953,13 @@ float *flux_transformer_forward(flux_transformer_t *tf,
     if (flux_substep_callback)
         flux_substep_callback(FLUX_SUBSTEP_FINAL_LAYER, 0, 1);
 
+#ifdef USE_METAL
+    /* Ensure all GPU operations complete before returning.
+     * This prevents issues where subsequent denoising steps
+     * start before previous step's GPU work is fully done. */
+    flux_gpu_sync();
+#endif
+
     return output;
 }
 

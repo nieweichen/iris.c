@@ -14,6 +14,10 @@
 #include <time.h>
 #include <sys/time.h>
 
+#ifdef USE_METAL
+#include "flux_metal.h"
+#endif
+
 /* Timing utilities for performance analysis - use wall-clock time */
 static double get_time_ms(void) {
     struct timeval tv;
