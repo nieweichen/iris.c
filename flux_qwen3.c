@@ -303,93 +303,114 @@ static void qwen3_attention_forward(qwen3_model_t *model, qwen3_layer_t *layer,
     apply_rope(model->q_buf, model->k_buf, model->rope_cos, model->rope_sin,
                seq_len, num_heads, num_kv_heads, head_dim);
 
-    /* Compute attention for each head with GQA
-     * Use BLAS/GPU for Q@K^T and scores@V matrix multiplications */
-    int heads_per_kv = num_heads / num_kv_heads;
-
-    /* Use pre-allocated work buffer for K transpose (Q, V, output use strided access) */
-    float *k_head_t = model->attn_k_head_t;
-
-    for (int h = 0; h < num_heads; h++) {
-        int kv_h = h / heads_per_kv;  /* Which KV head to use */
-        float *scores = model->attn_scores + h * seq_len * seq_len;
-
-        /* Q can be accessed directly with strided lda (avoids copy)
-         * Q[s,d] = q_buf[s * q_dim + h * head_dim + d]
-         * Use pointer to head h with lda = q_dim */
-        const float *q_strided = model->q_buf + h * head_dim;
-
-        /* K still needs transpose: K^T[d,s] = K[s,kv_h,d]
-         * This requires explicit transpose since we need [head_dim, seq_len] layout */
-        for (int s = 0; s < seq_len; s++) {
-            for (int d = 0; d < head_dim; d++) {
-                k_head_t[d * seq_len + s] = model->k_buf[s * kv_dim + kv_h * head_dim + d];
-            }
+#ifdef USE_METAL
+    /* Try GPU-accelerated causal attention for all heads in parallel.
+     * The GPU kernel uses both causal masking and attention mask.
+     * This ensures exact parity with CPU implementation. */
+    if (flux_metal_available()) {
+        if (flux_metal_causal_attention(model->attn_out,
+                                         model->q_buf, model->k_buf, model->v_buf,
+                                         attention_mask,
+                                         seq_len, num_heads, num_kv_heads,
+                                         head_dim, scale)) {
+            /* GPU attention succeeded - skip to output projection */
+            goto output_proj;
         }
+    }
+#endif
 
-        /* scores = scale * Q @ K^T using strided BLAS
-         * Q: [seq_len, head_dim] with lda=q_dim, K^T: [head_dim, seq_len] */
-#ifdef USE_BLAS
-        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                    seq_len, seq_len, head_dim,
-                    scale, q_strided, q_dim, k_head_t, seq_len,
-                    0.0f, scores, seq_len);
-#else
-        /* Fallback: naive matmul with strided Q access */
-        for (int i = 0; i < seq_len; i++) {
-            for (int j = 0; j < seq_len; j++) {
-                float dot = 0.0f;
+    /* CPU fallback: compute attention for each head with GQA
+     * Use BLAS for Q@K^T and scores@V matrix multiplications */
+    {
+        int heads_per_kv = num_heads / num_kv_heads;
+
+        /* Use pre-allocated work buffer for K transpose (Q, V, output use strided access) */
+        float *k_head_t = model->attn_k_head_t;
+
+        for (int h = 0; h < num_heads; h++) {
+            int kv_h = h / heads_per_kv;  /* Which KV head to use */
+            float *scores = model->attn_scores + h * seq_len * seq_len;
+
+            /* Q can be accessed directly with strided lda (avoids copy)
+             * Q[s,d] = q_buf[s * q_dim + h * head_dim + d]
+             * Use pointer to head h with lda = q_dim */
+            const float *q_strided = model->q_buf + h * head_dim;
+
+            /* K still needs transpose: K^T[d,s] = K[s,kv_h,d]
+             * This requires explicit transpose since we need [head_dim, seq_len] layout */
+            for (int s = 0; s < seq_len; s++) {
                 for (int d = 0; d < head_dim; d++) {
-                    dot += q_strided[i * q_dim + d] * k_head_t[d * seq_len + j];
-                }
-                scores[i * seq_len + j] = dot * scale;
-            }
-        }
-#endif
-
-        /* Apply causal mask and attention mask, then softmax */
-        for (int i = 0; i < seq_len; i++) {
-            for (int j = 0; j < seq_len; j++) {
-                if (j > i) {
-                    scores[i * seq_len + j] = -1e9f;
-                }
-                if (attention_mask && attention_mask[j] == 0) {
-                    scores[i * seq_len + j] = -1e9f;
+                    k_head_t[d * seq_len + s] = model->k_buf[s * kv_dim + kv_h * head_dim + d];
                 }
             }
-            qwen3_softmax(scores + i * seq_len, seq_len);
-        }
 
-        /* V can be accessed directly with strided lda (avoids copy)
-         * V[s,d] = v_buf[s * kv_dim + kv_h * head_dim + d] */
-        const float *v_strided = model->v_buf + kv_h * head_dim;
-
-        /* Output can be written directly with strided ldc (avoids copy)
-         * out[s,d] = attn_out[s * q_dim + h * head_dim + d] */
-        float *out_strided = model->attn_out + h * head_dim;
-
-        /* out = scores @ V using strided BLAS (avoids V copy and output copy)
-         * scores: [seq_len, seq_len], V: [seq_len, head_dim] with ldb=kv_dim */
+            /* scores = scale * Q @ K^T using strided BLAS
+             * Q: [seq_len, head_dim] with lda=q_dim, K^T: [head_dim, seq_len] */
 #ifdef USE_BLAS
-        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                    seq_len, head_dim, seq_len,
-                    1.0f, scores, seq_len, v_strided, kv_dim,
-                    0.0f, out_strided, q_dim);
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        seq_len, seq_len, head_dim,
+                        scale, q_strided, q_dim, k_head_t, seq_len,
+                        0.0f, scores, seq_len);
 #else
-        for (int i = 0; i < seq_len; i++) {
-            for (int d = 0; d < head_dim; d++) {
-                float sum = 0.0f;
+            /* Fallback: naive matmul with strided Q access */
+            for (int i = 0; i < seq_len; i++) {
                 for (int j = 0; j < seq_len; j++) {
-                    sum += scores[i * seq_len + j] * v_strided[j * kv_dim + d];
+                    float dot = 0.0f;
+                    for (int d = 0; d < head_dim; d++) {
+                        dot += q_strided[i * q_dim + d] * k_head_t[d * seq_len + j];
+                    }
+                    scores[i * seq_len + j] = dot * scale;
                 }
-                out_strided[i * q_dim + d] = sum;
             }
-        }
 #endif
+
+            /* Apply causal mask and attention mask, then softmax */
+            for (int i = 0; i < seq_len; i++) {
+                for (int j = 0; j < seq_len; j++) {
+                    if (j > i) {
+                        scores[i * seq_len + j] = -1e9f;
+                    }
+                    if (attention_mask && attention_mask[j] == 0) {
+                        scores[i * seq_len + j] = -1e9f;
+                    }
+                }
+                qwen3_softmax(scores + i * seq_len, seq_len);
+            }
+
+            /* V can be accessed directly with strided lda (avoids copy)
+             * V[s,d] = v_buf[s * kv_dim + kv_h * head_dim + d] */
+            const float *v_strided = model->v_buf + kv_h * head_dim;
+
+            /* Output can be written directly with strided ldc (avoids copy)
+             * out[s,d] = attn_out[s * q_dim + h * head_dim + d] */
+            float *out_strided = model->attn_out + h * head_dim;
+
+            /* out = scores @ V using strided BLAS (avoids V copy and output copy)
+             * scores: [seq_len, seq_len], V: [seq_len, head_dim] with ldb=kv_dim */
+#ifdef USE_BLAS
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        seq_len, head_dim, seq_len,
+                        1.0f, scores, seq_len, v_strided, kv_dim,
+                        0.0f, out_strided, q_dim);
+#else
+            for (int i = 0; i < seq_len; i++) {
+                for (int d = 0; d < head_dim; d++) {
+                    float sum = 0.0f;
+                    for (int j = 0; j < seq_len; j++) {
+                        sum += scores[i * seq_len + j] * v_strided[j * kv_dim + d];
+                    }
+                    out_strided[i * q_dim + d] = sum;
+                }
+            }
+#endif
+        }
     }
 
     /* Work buffers are pre-allocated in model, no free needed */
 
+#ifdef USE_METAL
+output_proj:
+#endif
     /* Output projection */
     qwen3_linear(model->hidden_state, model->attn_out, layer->attn.o_proj_weight,
                  seq_len, q_dim, hidden);
