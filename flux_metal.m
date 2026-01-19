@@ -1217,14 +1217,6 @@ int flux_gpu_in_chain(void) {
     return g_chain_mode;
 }
 
-/* Get command buffer for chain mode or create new one */
-static id<MTLCommandBuffer> get_chain_cmd(void) {
-    if (g_chain_mode && g_chain_cmd) {
-        return g_chain_cmd;
-    }
-    return [g_queue commandBuffer];
-}
-
 /* Get or create command buffer for tensor operations */
 static id<MTLCommandBuffer> get_tensor_cmd(void) {
     /* Prefer chain mode command buffer if active */
@@ -1400,7 +1392,11 @@ int flux_metal_init_shaders(void) {
 
         /* Compile shader library */
         MTLCompileOptions *options = [[MTLCompileOptions alloc] init];
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+        options.mathMode = MTLMathModeFast;
+#else
         options.fastMathEnabled = YES;
+#endif
 
         g_shader_library = [g_device newLibraryWithSource:shaderSource
                                                   options:options

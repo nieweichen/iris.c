@@ -852,14 +852,6 @@ static void swiglu_ffn_bf16(float *out, const float *x,
     free(up);
 }
 
-static void swiglu_ffn(float *out, const float *x,
-                       const float *gate_weight, const float *up_weight,
-                       const float *down_weight,
-                       int seq, int hidden, int mlp_hidden) {
-    swiglu_ffn_bf16(out, x, gate_weight, up_weight, down_weight,
-                    NULL, NULL, NULL, seq, hidden, mlp_hidden);
-}
-
 /* ========================================================================
  * Double-Stream Block (MM-DiT)
  * ======================================================================== */
