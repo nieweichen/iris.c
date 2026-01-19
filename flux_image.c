@@ -326,40 +326,319 @@ static uint32_t read_be32(FILE *f) {
            ((uint32_t)buf[2] << 8) | buf[3];
 }
 
-/* Simple zlib inflate (handles stored blocks only for simplicity) */
-static uint8_t *inflate_simple(const uint8_t *data, size_t len, size_t expected_len) {
-    uint8_t *out = (uint8_t *)malloc(expected_len);
-    if (!out) return NULL;
+typedef struct {
+    const uint8_t *data;
+    size_t len;
+    size_t bytepos;
+    uint32_t bitbuf;
+    int bitcount;
+} png_bitstream;
 
-    /* Skip zlib header (2 bytes) */
-    size_t pos = 2;
-    size_t out_pos = 0;
+static int png_bitstream_fill(png_bitstream *bs, int n) {
+    while (bs->bitcount < n && bs->bytepos < bs->len) {
+        bs->bitbuf |= (uint32_t)bs->data[bs->bytepos++] << bs->bitcount;
+        bs->bitcount += 8;
+    }
+    return bs->bitcount >= n;
+}
 
-    while (pos < len - 4 && out_pos < expected_len) {
-        uint8_t header = data[pos++];
-        int is_final = header & 1;
-        int btype = (header >> 1) & 3;
+static int png_bitstream_get(png_bitstream *bs, int n, uint32_t *out) {
+    if (n == 0) {
+        *out = 0;
+        return 1;
+    }
+    if (!png_bitstream_fill(bs, n)) return 0;
+    *out = bs->bitbuf & ((1u << n) - 1u);
+    bs->bitbuf >>= n;
+    bs->bitcount -= n;
+    return 1;
+}
 
-        if (btype == 0) {
-            /* Stored block */
-            uint16_t block_len = data[pos] | (data[pos + 1] << 8);
-            pos += 4;  /* Skip LEN and NLEN */
+static int png_bitstream_align(png_bitstream *bs) {
+    uint32_t discard;
+    int skip = bs->bitcount & 7;
+    if (skip == 0) return 1;
+    return png_bitstream_get(bs, skip, &discard);
+}
 
-            if (out_pos + block_len > expected_len) break;
-            memcpy(out + out_pos, data + pos, block_len);
-            out_pos += block_len;
-            pos += block_len;
-        } else {
-            /* Compressed blocks not fully supported in this simple implementation */
-            /* For a complete implementation, we'd need huffman decoding */
-            free(out);
-            return NULL;
-        }
+static int png_bitstream_read_bytes(png_bitstream *bs, uint8_t *out, size_t len) {
+    if (bs->bitcount == 0) {
+        if (bs->bytepos + len > bs->len) return 0;
+        memcpy(out, bs->data + bs->bytepos, len);
+        bs->bytepos += len;
+        return 1;
+    }
+    for (size_t i = 0; i < len; i++) {
+        uint32_t v;
+        if (!png_bitstream_get(bs, 8, &v)) return 0;
+        out[i] = (uint8_t)v;
+    }
+    return 1;
+}
 
-        if (is_final) break;
+#define PNG_MAXBITS 15
+
+typedef struct {
+    uint16_t count[PNG_MAXBITS + 1];
+    uint16_t symbol[288];
+} png_huffman;
+
+static int png_huffman_build(png_huffman *h, const uint8_t *lengths, int n) {
+    uint16_t offs[PNG_MAXBITS + 1];
+    int left = 1;
+
+    memset(h->count, 0, sizeof(h->count));
+    for (int i = 0; i < n; i++) {
+        if (lengths[i] > PNG_MAXBITS) return 0;
+        h->count[lengths[i]]++;
     }
 
+    for (int len = 1; len <= PNG_MAXBITS; len++) {
+        left <<= 1;
+        left -= h->count[len];
+        if (left < 0) return 0;
+    }
+
+    offs[1] = 0;
+    for (int len = 1; len < PNG_MAXBITS; len++) {
+        offs[len + 1] = offs[len] + h->count[len];
+    }
+
+    for (int i = 0; i < n; i++) {
+        int len = lengths[i];
+        if (len) {
+            h->symbol[offs[len]++] = (uint16_t)i;
+        }
+    }
+
+    return 1;
+}
+
+static int png_huffman_decode(png_bitstream *bs, const png_huffman *h, int *symbol) {
+    uint32_t code = 0;
+    uint32_t first = 0;
+    uint32_t index = 0;
+
+    for (int len = 1; len <= PNG_MAXBITS; len++) {
+        uint32_t bit;
+        if (!png_bitstream_get(bs, 1, &bit)) return 0;
+        code |= bit;
+        uint32_t count = h->count[len];
+        if (code < first + count) {
+            *symbol = h->symbol[index + (code - first)];
+            return 1;
+        }
+        index += count;
+        first += count;
+        first <<= 1;
+        code <<= 1;
+    }
+    return 0;
+}
+
+static int png_build_fixed_huffman(png_huffman *litlen, png_huffman *dist) {
+    uint8_t litlen_lengths[288];
+    uint8_t dist_lengths[32];
+
+    for (int i = 0; i <= 143; i++) litlen_lengths[i] = 8;
+    for (int i = 144; i <= 255; i++) litlen_lengths[i] = 9;
+    for (int i = 256; i <= 279; i++) litlen_lengths[i] = 7;
+    for (int i = 280; i <= 287; i++) litlen_lengths[i] = 8;
+    for (int i = 0; i < 32; i++) dist_lengths[i] = 5;
+
+    if (!png_huffman_build(litlen, litlen_lengths, 288)) return 0;
+    if (!png_huffman_build(dist, dist_lengths, 32)) return 0;
+    return 1;
+}
+
+static int png_build_dynamic_huffman(png_bitstream *bs, png_huffman *litlen, png_huffman *dist) {
+    static const uint8_t order[19] = {
+        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
+    };
+    uint32_t hlit, hdist, hclen;
+    uint8_t code_lengths[19] = {0};
+    png_huffman code_huff;
+
+    if (!png_bitstream_get(bs, 5, &hlit)) return 0;
+    if (!png_bitstream_get(bs, 5, &hdist)) return 0;
+    if (!png_bitstream_get(bs, 4, &hclen)) return 0;
+    int nlen = (int)hlit + 257;
+    int ndist = (int)hdist + 1;
+    int ncode = (int)hclen + 4;
+
+    if (nlen > 288 || ndist > 32) return 0;
+
+    for (int i = 0; i < ncode; i++) {
+        uint32_t v;
+        if (!png_bitstream_get(bs, 3, &v)) return 0;
+        code_lengths[order[i]] = (uint8_t)v;
+    }
+
+    if (!png_huffman_build(&code_huff, code_lengths, 19)) return 0;
+
+    uint8_t lengths[320];
+    int total = nlen + ndist;
+    int i = 0;
+    int prev = 0;
+
+    while (i < total) {
+        int sym;
+        if (!png_huffman_decode(bs, &code_huff, &sym)) return 0;
+        if (sym <= 15) {
+            lengths[i++] = (uint8_t)sym;
+            prev = sym;
+        } else if (sym == 16) {
+            uint32_t repeat;
+            if (i == 0) return 0;
+            if (!png_bitstream_get(bs, 2, &repeat)) return 0;
+            repeat += 3;
+            if (i + (int)repeat > total) return 0;
+            for (uint32_t r = 0; r < repeat; r++) lengths[i++] = (uint8_t)prev;
+        } else if (sym == 17) {
+            uint32_t repeat;
+            if (!png_bitstream_get(bs, 3, &repeat)) return 0;
+            repeat += 3;
+            if (i + (int)repeat > total) return 0;
+            for (uint32_t r = 0; r < repeat; r++) lengths[i++] = 0;
+            prev = 0;
+        } else if (sym == 18) {
+            uint32_t repeat;
+            if (!png_bitstream_get(bs, 7, &repeat)) return 0;
+            repeat += 11;
+            if (i + (int)repeat > total) return 0;
+            for (uint32_t r = 0; r < repeat; r++) lengths[i++] = 0;
+            prev = 0;
+        } else {
+            return 0;
+        }
+    }
+
+    if (!png_huffman_build(litlen, lengths, nlen)) return 0;
+    if (!png_huffman_build(dist, lengths + nlen, ndist)) return 0;
+
+    return 1;
+}
+
+/* Zlib inflate (stored, fixed, and dynamic blocks) */
+static uint8_t *inflate_zlib(const uint8_t *data, size_t len, size_t expected_len) {
+    if (len < 6) return NULL;
+
+    uint8_t cmf = data[0];
+    uint8_t flg = data[1];
+    if ((cmf & 0x0f) != 8) return NULL;
+    if (((cmf << 8) + flg) % 31 != 0) return NULL;
+
+    size_t pos = 2;
+    if (flg & 0x20) {
+        if (len < 10) return NULL;
+        pos += 4;
+    }
+    if (len < pos + 4) return NULL;
+
+    size_t deflate_len = len - pos - 4;
+    png_bitstream bs = {data + pos, deflate_len, 0, 0, 0};
+
+    uint8_t *out = (uint8_t *)malloc(expected_len);
+    if (!out) return NULL;
+    size_t out_pos = 0;
+
+    static const int len_base[29] = {
+        3, 4, 5, 6, 7, 8, 9, 10, 11, 13,
+        15, 17, 19, 23, 27, 31, 35, 43, 51, 59,
+        67, 83, 99, 115, 131, 163, 195, 227, 258
+    };
+    static const int len_extra[29] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1,
+        1, 1, 2, 2, 2, 2, 3, 3, 3, 3,
+        4, 4, 4, 4, 5, 5, 5, 5, 0
+    };
+    static const int dist_base[30] = {
+        1, 2, 3, 4, 5, 7, 9, 13, 17, 25,
+        33, 49, 65, 97, 129, 193, 257, 385, 513, 769,
+        1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577
+    };
+    static const int dist_extra[30] = {
+        0, 0, 0, 0, 1, 1, 2, 2, 3, 3,
+        4, 4, 5, 5, 6, 6, 7, 7, 8, 8,
+        9, 9, 10, 10, 11, 11, 12, 12, 13, 13
+    };
+
+    int final = 0;
+    while (!final) {
+        uint32_t bfinal, btype;
+        if (!png_bitstream_get(&bs, 1, &bfinal)) goto fail;
+        if (!png_bitstream_get(&bs, 2, &btype)) goto fail;
+        final = (int)bfinal;
+
+        if (btype == 0) {
+            if (!png_bitstream_align(&bs)) goto fail;
+            uint32_t stored_len, stored_nlen;
+            if (!png_bitstream_get(&bs, 16, &stored_len)) goto fail;
+            if (!png_bitstream_get(&bs, 16, &stored_nlen)) goto fail;
+            if ((stored_len ^ 0xffffu) != stored_nlen) goto fail;
+            if (out_pos + stored_len > expected_len) goto fail;
+            if (!png_bitstream_read_bytes(&bs, out + out_pos, stored_len)) goto fail;
+            out_pos += stored_len;
+        } else if (btype == 1 || btype == 2) {
+            png_huffman litlen, dist;
+            if (btype == 1) {
+                if (!png_build_fixed_huffman(&litlen, &dist)) goto fail;
+            } else {
+                if (!png_build_dynamic_huffman(&bs, &litlen, &dist)) goto fail;
+            }
+
+            for (;;) {
+                int sym;
+                if (!png_huffman_decode(&bs, &litlen, &sym)) goto fail;
+                if (sym < 256) {
+                    if (out_pos >= expected_len) goto fail;
+                    out[out_pos++] = (uint8_t)sym;
+                } else if (sym == 256) {
+                    break;
+                } else if (sym <= 285) {
+                    int len_sym = sym - 257;
+                    uint32_t extra, dist_extra_bits;
+                    int dist_sym;
+                    int length = len_base[len_sym];
+                    if (len_extra[len_sym]) {
+                        if (!png_bitstream_get(&bs, len_extra[len_sym], &extra)) goto fail;
+                        length += (int)extra;
+                    }
+                    if (!png_huffman_decode(&bs, &dist, &dist_sym)) goto fail;
+                    if (dist_sym >= 30) goto fail;
+                    int distance = dist_base[dist_sym];
+                    if (dist_extra[dist_sym]) {
+                        if (!png_bitstream_get(&bs, dist_extra[dist_sym], &dist_extra_bits)) goto fail;
+                        distance += (int)dist_extra_bits;
+                    }
+                    if (distance <= 0 || (size_t)distance > out_pos) goto fail;
+                    if (out_pos + length > expected_len) goto fail;
+                    for (int i = 0; i < length; i++) {
+                        out[out_pos] = out[out_pos - distance];
+                        out_pos++;
+                    }
+                } else {
+                    goto fail;
+                }
+            }
+        } else {
+            goto fail;
+        }
+    }
+
+    if (out_pos != expected_len) goto fail;
+
+    uint32_t expected_adler = ((uint32_t)data[len - 4] << 24) |
+                              ((uint32_t)data[len - 3] << 16) |
+                              ((uint32_t)data[len - 2] << 8) |
+                              (uint32_t)data[len - 1];
+    if (adler32(out, expected_len) != expected_adler) goto fail;
+
     return out;
+
+fail:
+    free(out);
+    return NULL;
 }
 
 /* Apply PNG filter to reconstructed row */
@@ -466,7 +745,7 @@ static flux_image *load_png(FILE *f) {
 
     /* Decompress */
     size_t raw_len = height * (1 + width * channels);
-    uint8_t *raw = inflate_simple(idat_data, idat_len, raw_len);
+    uint8_t *raw = inflate_zlib(idat_data, idat_len, raw_len);
     free(idat_data);
 
     if (!raw) return NULL;

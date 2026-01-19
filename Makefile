@@ -19,7 +19,7 @@ LIB = libflux.a
 # Debug build flags
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
-.PHONY: all clean debug lib install info test help generic blas mps
+.PHONY: all clean debug lib install info test pngtest help generic blas mps
 
 # Default: show available targets
 all: help
@@ -39,6 +39,7 @@ endif
 	@echo "Other targets:"
 	@echo "  make clean    - Remove build artifacts"
 	@echo "  make test     - Run inference test"
+	@echo "  make pngtest  - Compare PNG load on compressed image"
 	@echo "  make info     - Show build configuration"
 	@echo "  make lib      - Build static library"
 	@echo ""
@@ -136,6 +137,14 @@ print(f'Max diff: {diff.max()}, Mean diff: {diff.mean():.4f}'); \
 exit(0 if diff.max() < 2 else 1)"
 	@rm -f /tmp/flux_test_output.png
 	@echo "TEST PASSED"
+
+pngtest:
+	@echo "Running PNG compression compare test..."
+	@$(CC) $(CFLAGS_BASE) -I. png_compare.c flux_image.c -lm -o /tmp/flux_png_compare
+	@/tmp/flux_png_compare images/woman_with_sunglasses.png images/woman_with_sunglasses_compressed2.png
+	@/tmp/flux_png_compare images/cat_uncompressed.png images/cat_compressed.png
+	@rm -f /tmp/flux_png_compare
+	@echo "PNG TEST PASSED"
 
 install: $(TARGET) $(LIB)
 	install -d /usr/local/bin
