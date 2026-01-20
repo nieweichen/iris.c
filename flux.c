@@ -115,7 +115,7 @@ static int file_exists(const char *path) {
 }
 
 flux_ctx *flux_load_dir(const char *model_dir) {
-    char path[512];
+    char path[1024];
 
     flux_ctx *ctx = calloc(1, sizeof(flux_ctx));
     if (!ctx) {
@@ -198,7 +198,7 @@ void flux_release_text_encoder(flux_ctx *ctx) {
 static int flux_load_transformer_if_needed(flux_ctx *ctx) {
     if (ctx->transformer) return 1;  /* Already loaded */
 
-    char path[512];
+    char path[1024];
     snprintf(path, sizeof(path), "%s/transformer/diffusion_pytorch_model.safetensors",
              ctx->model_dir);
 

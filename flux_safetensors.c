@@ -191,8 +191,7 @@ static int parse_header(safetensors_file_t *sf) {
 
         /* Parse tensor entry */
         safetensor_t *t = &sf->tensors[sf->num_tensors];
-        strncpy(t->name, name, sizeof(t->name) - 1);
-        t->name[sizeof(t->name) - 1] = '\0';
+        snprintf(t->name, sizeof(t->name), "%s", name);
 
         if (parse_tensor_entry(&p, t) != 0) return -1;
         sf->num_tensors++;
