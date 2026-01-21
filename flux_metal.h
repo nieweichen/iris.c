@@ -427,39 +427,6 @@ flux_gpu_tensor_t flux_gpu_linear_bf16_native(flux_gpu_tensor_t x,
                                                const uint16_t *W_bf16,
                                                int seq_len, int in_dim, int out_dim);
 
-/* BF16 AdaLN normalization */
-void flux_gpu_adaln_norm_bf16(flux_gpu_tensor_t out, flux_gpu_tensor_t x,
-                               flux_gpu_tensor_t shift_bf16, flux_gpu_tensor_t scale_bf16,
-                               int seq, int hidden, float eps);
-
-/* BF16 QK RMSNorm (in-place) */
-void flux_gpu_qk_rms_norm_bf16(flux_gpu_tensor_t q, flux_gpu_tensor_t k,
-                                flux_gpu_tensor_t q_weight_bf16, flux_gpu_tensor_t k_weight_bf16,
-                                int seq, int heads, int head_dim, float eps);
-
-/* BF16 SiLU multiply: gate = silu(gate) * up */
-void flux_gpu_silu_mul_bf16(flux_gpu_tensor_t gate, flux_gpu_tensor_t up, int n);
-
-/* BF16 Gated add: out += gate * proj */
-void flux_gpu_gated_add_bf16(flux_gpu_tensor_t out, flux_gpu_tensor_t gate_bf16,
-                              flux_gpu_tensor_t proj, int seq, int hidden);
-
-/* BF16 RoPE (frequencies are f32 on CPU) */
-void flux_gpu_rope_unified_bf16(flux_gpu_tensor_t q, flux_gpu_tensor_t k,
-                                 const float *txt_cos, const float *txt_sin,
-                                 const float *img_cos, const float *img_sin,
-                                 int seq, int img_offset, int heads, int head_dim, int axis_dim);
-
-/* BF16 Split fused QKV+MLP output */
-void flux_gpu_split_qkv_mlp_bf16(flux_gpu_tensor_t fused,
-                                  flux_gpu_tensor_t q, flux_gpu_tensor_t k, flux_gpu_tensor_t v,
-                                  flux_gpu_tensor_t gate, flux_gpu_tensor_t up,
-                                  int seq, int hidden, int mlp_hidden);
-
-/* BF16 Concat attention + MLP outputs */
-void flux_gpu_concat_attn_mlp_bf16(flux_gpu_tensor_t attn, flux_gpu_tensor_t mlp,
-                                    flux_gpu_tensor_t out, int seq, int hidden, int mlp_hidden);
-
 /* BF16 Transpose for attention: [seq, heads*head_dim] -> [heads, seq, head_dim] */
 void flux_gpu_transpose_to_heads_bf16(flux_gpu_tensor_t in, flux_gpu_tensor_t out,
                                        int seq, int heads, int head_dim);
@@ -467,15 +434,6 @@ void flux_gpu_transpose_to_heads_bf16(flux_gpu_tensor_t in, flux_gpu_tensor_t ou
 /* BF16 Transpose for attention output: [heads, seq, head_dim] -> [seq, heads*head_dim] */
 void flux_gpu_transpose_from_heads_bf16(flux_gpu_tensor_t in, flux_gpu_tensor_t out,
                                          int seq, int heads, int head_dim);
-
-/* Native BF16 attention on GPU tensors (all tensors must be bf16 format).
- * Uses bf16 compute shaders with f32 accumulation for numerical stability.
- * Q, K, V: [heads, seq, head_dim] layout (already transposed)
- * Returns 1 on success, 0 if tensors are not bf16 or shaders unavailable.
- */
-int flux_gpu_attention_bf16_native(flux_gpu_tensor_t out,
-                                    flux_gpu_tensor_t Q, flux_gpu_tensor_t K, flux_gpu_tensor_t V,
-                                    int seq_q, int seq_k, int num_heads, int head_dim, float scale);
 
 /*
  * GPU-accelerated scaled dot-product attention.
