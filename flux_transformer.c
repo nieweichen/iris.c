@@ -50,14 +50,17 @@ static double tf_get_time_ms(void) {
 #include "flux_metal.h"
 #endif
 
-/* Helper macro for using bf16 linear layer when available
- * Uses bf16 if w_bf16 is not NULL (GPU), otherwise falls back to f32 */
+/* Helper macro for using bf16 linear layer when available.
+ * When bf16 weights are expected but missing, abort with error. */
 #define LINEAR_BF16_OR_F32(out, x, w_f32, w_bf16, seq, in_dim, out_dim) \
     do { \
         if ((w_bf16) != NULL) { \
             flux_linear_nobias_bf16((out), (x), (w_bf16), (seq), (in_dim), (out_dim)); \
-        } else { \
+        } else if ((w_f32) != NULL) { \
             flux_linear_nobias((out), (x), (w_f32), (seq), (in_dim), (out_dim)); \
+        } else { \
+            fprintf(stderr, "FATAL: Neither bf16 nor f32 weights available\n"); \
+            exit(1); \
         } \
     } while(0)
 
@@ -2263,11 +2266,12 @@ flux_transformer_t *flux_transformer_load_safetensors(safetensors_file_t *sf) {
     int mlp = tf->mlp_hidden;
 
     /* Input projections */
-    tf->img_in_weight = get_sf_tensor_tf(sf, "x_embedder.weight");
-    tf->txt_in_weight = get_sf_tensor_tf(sf, "context_embedder.weight");
     if (tf->use_bf16) {
         tf->img_in_weight_bf16 = get_sf_tensor_bf16(sf, "x_embedder.weight");
         tf->txt_in_weight_bf16 = get_sf_tensor_bf16(sf, "context_embedder.weight");
+    } else {
+        tf->img_in_weight = get_sf_tensor_tf(sf, "x_embedder.weight");
+        tf->txt_in_weight = get_sf_tensor_tf(sf, "context_embedder.weight");
     }
 
     /* Time embedding
@@ -2280,21 +2284,13 @@ flux_transformer_t *flux_transformer_load_safetensors(safetensors_file_t *sf) {
     tf->time_embed.fc2_weight = get_sf_tensor_tf(sf,
         "time_guidance_embed.timestep_embedder.linear_2.weight");
 
-    /* Modulation weights */
+    /* Modulation weights - these are always needed in f32 for CPU modulation computation */
     tf->adaln_double_img_weight = get_sf_tensor_tf(sf,
         "double_stream_modulation_img.linear.weight");
     tf->adaln_double_txt_weight = get_sf_tensor_tf(sf,
         "double_stream_modulation_txt.linear.weight");
     tf->adaln_single_weight = get_sf_tensor_tf(sf,
         "single_stream_modulation.linear.weight");
-    if (tf->use_bf16) {
-        tf->adaln_double_img_weight_bf16 = get_sf_tensor_bf16(sf,
-            "double_stream_modulation_img.linear.weight");
-        tf->adaln_double_txt_weight_bf16 = get_sf_tensor_bf16(sf,
-            "double_stream_modulation_txt.linear.weight");
-        tf->adaln_single_weight_bf16 = get_sf_tensor_bf16(sf,
-            "single_stream_modulation.linear.weight");
-    }
 
     /* Double blocks */
     tf->double_blocks = calloc(tf->num_double_layers, sizeof(double_block_t));
@@ -2309,30 +2305,21 @@ flux_transformer_t *flux_transformer_load_safetensors(safetensors_file_t *sf) {
 
         /* Image Q, K, V projections (separate) */
         snprintf(name, sizeof(name), "transformer_blocks.%d.attn.to_q.weight", i);
-        b->img_q_weight = get_sf_tensor_tf(sf, name);
         if (tf->use_bf16) b->img_q_weight_bf16 = get_sf_tensor_bf16(sf, name);
+        else b->img_q_weight = get_sf_tensor_tf(sf, name);
         snprintf(name, sizeof(name), "transformer_blocks.%d.attn.to_k.weight", i);
-        b->img_k_weight = get_sf_tensor_tf(sf, name);
         if (tf->use_bf16) b->img_k_weight_bf16 = get_sf_tensor_bf16(sf, name);
+        else b->img_k_weight = get_sf_tensor_tf(sf, name);
         snprintf(name, sizeof(name), "transformer_blocks.%d.attn.to_v.weight", i);
-        b->img_v_weight = get_sf_tensor_tf(sf, name);
         if (tf->use_bf16) b->img_v_weight_bf16 = get_sf_tensor_bf16(sf, name);
+        else b->img_v_weight = get_sf_tensor_tf(sf, name);
 
         snprintf(name, sizeof(name), "transformer_blocks.%d.attn.to_out.0.weight", i);
-        b->img_proj_weight = get_sf_tensor_tf(sf, name);
         if (tf->use_bf16) b->img_proj_weight_bf16 = get_sf_tensor_bf16(sf, name);
+        else b->img_proj_weight = get_sf_tensor_tf(sf, name);
 
         /* Image FFN - linear_in contains gate and up fused (18432 = 2*9216) */
         snprintf(name, sizeof(name), "transformer_blocks.%d.ff.linear_in.weight", i);
-        float *ff_in = get_sf_tensor_tf(sf, name);
-        if (ff_in) {
-            /* Split into gate and up */
-            b->img_mlp_gate_weight = malloc(mlp * h * sizeof(float));
-            b->img_mlp_up_weight = malloc(mlp * h * sizeof(float));
-            memcpy(b->img_mlp_gate_weight, ff_in, mlp * h * sizeof(float));
-            memcpy(b->img_mlp_up_weight, ff_in + mlp * h, mlp * h * sizeof(float));
-            free(ff_in);
-        }
         if (tf->use_bf16) {
             uint16_t *ff_in_bf16 = get_sf_tensor_bf16(sf, name);
             if (ff_in_bf16) {
@@ -2342,11 +2329,20 @@ flux_transformer_t *flux_transformer_load_safetensors(safetensors_file_t *sf) {
                 memcpy(b->img_mlp_up_weight_bf16, ff_in_bf16 + mlp * h, mlp * h * sizeof(uint16_t));
                 free(ff_in_bf16);
             }
+        } else {
+            float *ff_in = get_sf_tensor_tf(sf, name);
+            if (ff_in) {
+                b->img_mlp_gate_weight = malloc(mlp * h * sizeof(float));
+                b->img_mlp_up_weight = malloc(mlp * h * sizeof(float));
+                memcpy(b->img_mlp_gate_weight, ff_in, mlp * h * sizeof(float));
+                memcpy(b->img_mlp_up_weight, ff_in + mlp * h, mlp * h * sizeof(float));
+                free(ff_in);
+            }
         }
 
         snprintf(name, sizeof(name), "transformer_blocks.%d.ff.linear_out.weight", i);
-        b->img_mlp_down_weight = get_sf_tensor_tf(sf, name);
         if (tf->use_bf16) b->img_mlp_down_weight_bf16 = get_sf_tensor_bf16(sf, name);
+        else b->img_mlp_down_weight = get_sf_tensor_tf(sf, name);
 
         /* Text stream - QK norm weights (always f32) */
         snprintf(name, sizeof(name), "transformer_blocks.%d.attn.norm_added_q.weight", i);
@@ -2356,28 +2352,20 @@ flux_transformer_t *flux_transformer_load_safetensors(safetensors_file_t *sf) {
 
         /* Text Q, K, V projections (separate) */
         snprintf(name, sizeof(name), "transformer_blocks.%d.attn.add_q_proj.weight", i);
-        b->txt_q_weight = get_sf_tensor_tf(sf, name);
         if (tf->use_bf16) b->txt_q_weight_bf16 = get_sf_tensor_bf16(sf, name);
+        else b->txt_q_weight = get_sf_tensor_tf(sf, name);
         snprintf(name, sizeof(name), "transformer_blocks.%d.attn.add_k_proj.weight", i);
-        b->txt_k_weight = get_sf_tensor_tf(sf, name);
         if (tf->use_bf16) b->txt_k_weight_bf16 = get_sf_tensor_bf16(sf, name);
+        else b->txt_k_weight = get_sf_tensor_tf(sf, name);
         snprintf(name, sizeof(name), "transformer_blocks.%d.attn.add_v_proj.weight", i);
-        b->txt_v_weight = get_sf_tensor_tf(sf, name);
         if (tf->use_bf16) b->txt_v_weight_bf16 = get_sf_tensor_bf16(sf, name);
+        else b->txt_v_weight = get_sf_tensor_tf(sf, name);
 
         snprintf(name, sizeof(name), "transformer_blocks.%d.attn.to_add_out.weight", i);
-        b->txt_proj_weight = get_sf_tensor_tf(sf, name);
         if (tf->use_bf16) b->txt_proj_weight_bf16 = get_sf_tensor_bf16(sf, name);
+        else b->txt_proj_weight = get_sf_tensor_tf(sf, name);
 
         snprintf(name, sizeof(name), "transformer_blocks.%d.ff_context.linear_in.weight", i);
-        float *txt_ff_in = get_sf_tensor_tf(sf, name);
-        if (txt_ff_in) {
-            b->txt_mlp_gate_weight = malloc(mlp * h * sizeof(float));
-            b->txt_mlp_up_weight = malloc(mlp * h * sizeof(float));
-            memcpy(b->txt_mlp_gate_weight, txt_ff_in, mlp * h * sizeof(float));
-            memcpy(b->txt_mlp_up_weight, txt_ff_in + mlp * h, mlp * h * sizeof(float));
-            free(txt_ff_in);
-        }
         if (tf->use_bf16) {
             uint16_t *txt_ff_in_bf16 = get_sf_tensor_bf16(sf, name);
             if (txt_ff_in_bf16) {
@@ -2387,11 +2375,20 @@ flux_transformer_t *flux_transformer_load_safetensors(safetensors_file_t *sf) {
                 memcpy(b->txt_mlp_up_weight_bf16, txt_ff_in_bf16 + mlp * h, mlp * h * sizeof(uint16_t));
                 free(txt_ff_in_bf16);
             }
+        } else {
+            float *txt_ff_in = get_sf_tensor_tf(sf, name);
+            if (txt_ff_in) {
+                b->txt_mlp_gate_weight = malloc(mlp * h * sizeof(float));
+                b->txt_mlp_up_weight = malloc(mlp * h * sizeof(float));
+                memcpy(b->txt_mlp_gate_weight, txt_ff_in, mlp * h * sizeof(float));
+                memcpy(b->txt_mlp_up_weight, txt_ff_in + mlp * h, mlp * h * sizeof(float));
+                free(txt_ff_in);
+            }
         }
 
         snprintf(name, sizeof(name), "transformer_blocks.%d.ff_context.linear_out.weight", i);
-        b->txt_mlp_down_weight = get_sf_tensor_tf(sf, name);
         if (tf->use_bf16) b->txt_mlp_down_weight_bf16 = get_sf_tensor_bf16(sf, name);
+        else b->txt_mlp_down_weight = get_sf_tensor_tf(sf, name);
     }
 
     /* Single blocks */
@@ -2405,25 +2402,22 @@ flux_transformer_t *flux_transformer_load_safetensors(safetensors_file_t *sf) {
         snprintf(name, sizeof(name), "single_transformer_blocks.%d.attn.norm_k.weight", i);
         b->norm_k_weight = get_sf_tensor_tf(sf, name);
 
-        /* Major linear weights - load bf16 version for GPU acceleration */
+        /* Major linear weights - load bf16 or f32 based on mode */
         snprintf(name, sizeof(name), "single_transformer_blocks.%d.attn.to_qkv_mlp_proj.weight", i);
-        b->qkv_mlp_weight = get_sf_tensor_tf(sf, name);
-        if (tf->use_bf16) {
-            b->qkv_mlp_weight_bf16 = get_sf_tensor_bf16(sf, name);
-        }
+        if (tf->use_bf16) b->qkv_mlp_weight_bf16 = get_sf_tensor_bf16(sf, name);
+        else b->qkv_mlp_weight = get_sf_tensor_tf(sf, name);
 
         snprintf(name, sizeof(name), "single_transformer_blocks.%d.attn.to_out.weight", i);
-        b->proj_mlp_weight = get_sf_tensor_tf(sf, name);
-        if (tf->use_bf16) {
-            b->proj_mlp_weight_bf16 = get_sf_tensor_bf16(sf, name);
-        }
+        if (tf->use_bf16) b->proj_mlp_weight_bf16 = get_sf_tensor_bf16(sf, name);
+        else b->proj_mlp_weight = get_sf_tensor_tf(sf, name);
     }
 
     /* Final layer */
     tf->final_norm_weight = get_sf_tensor_tf(sf, "norm_out.linear.weight");
-    tf->final_proj_weight = get_sf_tensor_tf(sf, "proj_out.weight");
     if (tf->use_bf16) {
         tf->final_proj_weight_bf16 = get_sf_tensor_bf16(sf, "proj_out.weight");
+    } else {
+        tf->final_proj_weight = get_sf_tensor_tf(sf, "proj_out.weight");
     }
 
     /* Precompute RoPE frequencies */
