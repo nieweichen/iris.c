@@ -108,36 +108,6 @@ void flux_add(float *out, const float *a, const float *b, int n) {
     }
 }
 
-void flux_add_scalar(float *out, const float *a, float s, int n) {
-    for (int i = 0; i < n; i++) {
-        out[i] = a[i] + s;
-    }
-}
-
-void flux_sub(float *out, const float *a, const float *b, int n) {
-    for (int i = 0; i < n; i++) {
-        out[i] = a[i] - b[i];
-    }
-}
-
-void flux_mul(float *out, const float *a, const float *b, int n) {
-    for (int i = 0; i < n; i++) {
-        out[i] = a[i] * b[i];
-    }
-}
-
-void flux_mul_scalar(float *out, const float *a, float s, int n) {
-    for (int i = 0; i < n; i++) {
-        out[i] = a[i] * s;
-    }
-}
-
-void flux_div(float *out, const float *a, const float *b, int n) {
-    for (int i = 0; i < n; i++) {
-        out[i] = a[i] / b[i];
-    }
-}
-
 void flux_add_inplace(float *a, const float *b, int n) {
     for (int i = 0; i < n; i++) {
         a[i] += b[i];
@@ -147,12 +117,6 @@ void flux_add_inplace(float *a, const float *b, int n) {
 void flux_mul_inplace(float *a, const float *b, int n) {
     for (int i = 0; i < n; i++) {
         a[i] *= b[i];
-    }
-}
-
-void flux_scale_inplace(float *a, float s, int n) {
-    for (int i = 0; i < n; i++) {
-        a[i] *= s;
     }
 }
 
@@ -238,20 +202,6 @@ void flux_matmul_t(float *C, const float *A, const float *B,
         }
     }
 #endif
-}
-
-void flux_batched_matmul(float *C, const float *A, const float *B,
-                         int batch, int M, int K, int N) {
-    int a_stride = M * K;
-    int b_stride = K * N;
-    int c_stride = M * N;
-
-    for (int b = 0; b < batch; b++) {
-        flux_matmul(C + b * c_stride,
-                    A + b * a_stride,
-                    B + b * b_stride,
-                    M, K, N);
-    }
 }
 
 void flux_linear(float *y, const float *x, const float *W, const float *b,
@@ -379,14 +329,6 @@ void flux_gpu_begin_batch(void) {
 void flux_gpu_end_batch(void) {
 #ifdef USE_METAL
     flux_metal_end_batch();
-#endif
-}
-
-int flux_gpu_in_batch(void) {
-#ifdef USE_METAL
-    return flux_metal_in_batch();
-#else
-    return 0;
 #endif
 }
 
@@ -528,122 +470,9 @@ naive_fallback:
     }
 }
 
-void flux_conv2d_transpose(float *out, const float *in, const float *weight, const float *bias,
-                           int batch, int in_ch, int out_ch, int H, int W,
-                           int kH, int kW, int stride, int padding, int output_padding) {
-    int outH = (H - 1) * stride - 2 * padding + kH + output_padding;
-    int outW = (W - 1) * stride - 2 * padding + kW + output_padding;
-
-    /* Gather-based transposed convolution (parallelizable, no write conflicts)
-     * For each output pixel, gather contributions from input pixels that map to it.
-     * This is the inverse of the scatter-add approach and allows safe parallelization.
-     */
-    for (int b = 0; b < batch; b++) {
-        for (int oc = 0; oc < out_ch; oc++) {
-            float bias_val = (bias != NULL) ? bias[oc] : 0.0f;
-
-            for (int oh = 0; oh < outH; oh++) {
-                for (int ow = 0; ow < outW; ow++) {
-                    float sum = bias_val;
-
-                    for (int kh = 0; kh < kH; kh++) {
-                        int num_h = oh + padding - kh;
-                        if (num_h % stride != 0) continue;
-                        int ih = num_h / stride;
-                        if (ih < 0 || ih >= H) continue;
-
-                        for (int kw = 0; kw < kW; kw++) {
-                            int num_w = ow + padding - kw;
-                            if (num_w % stride != 0) continue;
-                            int iw = num_w / stride;
-                            if (iw < 0 || iw >= W) continue;
-
-                            const float *in_ptr = in + b * in_ch * H * W + ih * W + iw;
-                            const float *w_ptr = weight + oc * kH * kW + kh * kW + kw;
-                            int in_step = H * W;
-                            int w_step = out_ch * kH * kW;
-
-                            for (int ic = 0; ic < in_ch; ic++) {
-                                sum += (*in_ptr) * (*w_ptr);
-                                in_ptr += in_step;
-                                w_ptr += w_step;
-                            }
-                        }
-                    }
-
-                    out[b * out_ch * outH * outW + oc * outH * outW + oh * outW + ow] = sum;
-                }
-            }
-        }
-    }
-}
-
-void flux_conv2d_depthwise(float *out, const float *in, const float *weight, const float *bias,
-                           int batch, int channels, int H, int W,
-                           int kH, int kW, int stride, int padding) {
-    int outH = (H + 2 * padding - kH) / stride + 1;
-    int outW = (W + 2 * padding - kW) / stride + 1;
-
-    for (int b = 0; b < batch; b++) {
-        for (int c = 0; c < channels; c++) {
-            for (int oh = 0; oh < outH; oh++) {
-                for (int ow = 0; ow < outW; ow++) {
-                    float sum = (bias != NULL) ? bias[c] : 0.0f;
-
-                    for (int kh = 0; kh < kH; kh++) {
-                        for (int kw = 0; kw < kW; kw++) {
-                            int ih = oh * stride - padding + kh;
-                            int iw = ow * stride - padding + kw;
-
-                            if (ih >= 0 && ih < H && iw >= 0 && iw < W) {
-                                int in_idx = b * channels * H * W + c * H * W + ih * W + iw;
-                                int w_idx = c * kH * kW + kh * kW + kw;
-                                sum += in[in_idx] * weight[w_idx];
-                            }
-                        }
-                    }
-
-                    int out_idx = b * channels * outH * outW + c * outH * outW + oh * outW + ow;
-                    out[out_idx] = sum;
-                }
-            }
-        }
-    }
-}
-
 /* ========================================================================
  * Normalization
  * ======================================================================== */
-
-void flux_layer_norm(float *out, const float *x, const float *gamma, const float *beta,
-                     int seq_len, int hidden, float eps) {
-    for (int s = 0; s < seq_len; s++) {
-        const float *x_row = x + s * hidden;
-        float *out_row = out + s * hidden;
-
-        /* Compute mean */
-        float mean = 0.0f;
-        for (int i = 0; i < hidden; i++) {
-            mean += x_row[i];
-        }
-        mean /= hidden;
-
-        /* Compute variance */
-        float var = 0.0f;
-        for (int i = 0; i < hidden; i++) {
-            float diff = x_row[i] - mean;
-            var += diff * diff;
-        }
-        var /= hidden;
-
-        /* Normalize and scale */
-        float std_inv = 1.0f / sqrtf(var + eps);
-        for (int i = 0; i < hidden; i++) {
-            float norm = (x_row[i] - mean) * std_inv;
-            out_row[i] = gamma[i] * norm + beta[i];
-        }
-    }
-}
 
 void flux_rms_norm(float *out, const float *x, const float *weight,
                    int seq_len, int hidden, float eps) {
@@ -686,7 +515,6 @@ void flux_group_norm(float *out, const float *x, const float *gamma, const float
             int c_start = g * channels_per_group;
             int c_end = c_start + channels_per_group;
 
-            /* Compute mean and variance for this group */
             float mean = 0.0f;
             int count = 0;
             for (int c = c_start; c < c_end; c++) {
@@ -710,7 +538,6 @@ void flux_group_norm(float *out, const float *x, const float *gamma, const float
 
             float std_inv = 1.0f / sqrtf(var + eps);
 
-            /* Normalize and scale */
             for (int c = c_start; c < c_end; c++) {
                 for (int i = 0; i < spatial; i++) {
                     int idx = b * channels * spatial + c * spatial + i;
@@ -748,14 +575,6 @@ void flux_batch_norm(float *out, const float *x,
  * Activation Functions
  * ======================================================================== */
 
-void flux_gelu(float *x, int n) {
-    for (int i = 0; i < n; i++) {
-        float val = x[i];
-        /* GELU(x) = x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))) */
-        x[i] = 0.5f * val * (1.0f + tanhf(0.7978845608f * (val + 0.044715f * val * val * val)));
-    }
-}
-
 void flux_silu(float *x, int n) {
 #ifdef USE_METAL
     /* Use GPU for very large arrays (overhead not worth it for small ones) */
@@ -768,14 +587,6 @@ void flux_silu(float *x, int n) {
     for (int i = 0; i < n; i++) {
         float val = x[i];
         x[i] = val / (1.0f + expf(-val));
-    }
-}
-
-void flux_swiglu(float *out, const float *x, const float *gate, int n) {
-    for (int i = 0; i < n; i++) {
-        float g = gate[i];
-        float silu_g = g / (1.0f + expf(-g));
-        out[i] = x[i] * silu_g;
     }
 }
 
@@ -813,18 +624,6 @@ void flux_softmax(float *x, int rows, int cols) {
     }
 }
 
-void flux_sigmoid(float *x, int n) {
-    for (int i = 0; i < n; i++) {
-        x[i] = 1.0f / (1.0f + expf(-x[i]));
-    }
-}
-
-void flux_tanh(float *x, int n) {
-    for (int i = 0; i < n; i++) {
-        x[i] = tanhf(x[i]);
-    }
-}
-
 /* ========================================================================
  * Attention Operations
  * ======================================================================== */
@@ -857,48 +656,6 @@ void flux_attention(float *out, const float *Q, const float *K, const float *V,
             flux_softmax(scores, seq_q, seq_k);
 
             /* out = scores @ V */
-            for (int i = 0; i < seq_q; i++) {
-                for (int d = 0; d < head_dim; d++) {
-                    float sum = 0.0f;
-                    for (int j = 0; j < seq_k; j++) {
-                        sum += scores[i * seq_k + j] * v[j * head_dim + d];
-                    }
-                    o[i * head_dim + d] = sum;
-                }
-            }
-        }
-    }
-
-    free(scores);
-}
-
-void flux_attention_masked(float *out, const float *Q, const float *K, const float *V,
-                           const float *mask,
-                           int batch, int heads, int seq_q, int seq_k, int head_dim,
-                           float scale) {
-    float *scores = (float *)malloc(seq_q * seq_k * sizeof(float));
-
-    for (int b = 0; b < batch; b++) {
-        for (int h = 0; h < heads; h++) {
-            const float *q = Q + (b * heads + h) * seq_q * head_dim;
-            const float *k = K + (b * heads + h) * seq_k * head_dim;
-            const float *v = V + (b * heads + h) * seq_k * head_dim;
-            float *o = out + (b * heads + h) * seq_q * head_dim;
-
-            /* scores = Q @ K^T * scale + mask */
-            for (int i = 0; i < seq_q; i++) {
-                for (int j = 0; j < seq_k; j++) {
-                    float dot = 0.0f;
-                    for (int d = 0; d < head_dim; d++) {
-                        dot += q[i * head_dim + d] * k[j * head_dim + d];
-                    }
-                    float m = (mask != NULL) ? mask[i * seq_k + j] : 0.0f;
-                    scores[i * seq_k + j] = dot * scale + m;
-                }
-            }
-
-            flux_softmax(scores, seq_q, seq_k);
-
             for (int i = 0; i < seq_q; i++) {
                 for (int d = 0; d < head_dim; d++) {
                     float sum = 0.0f;
@@ -1254,72 +1011,6 @@ void flux_compute_rope_freqs(float *freqs, const int *pos, int seq, int dim, flo
  * Pooling and Reshape
  * ======================================================================== */
 
-void flux_avgpool2d(float *out, const float *in,
-                    int batch, int channels, int H, int W,
-                    int kH, int kW, int stride, int padding) {
-    int outH = (H + 2 * padding - kH) / stride + 1;
-    int outW = (W + 2 * padding - kW) / stride + 1;
-
-    for (int b = 0; b < batch; b++) {
-        for (int c = 0; c < channels; c++) {
-            for (int oh = 0; oh < outH; oh++) {
-                for (int ow = 0; ow < outW; ow++) {
-                    float sum = 0.0f;
-                    int count = 0;
-
-                    for (int kh = 0; kh < kH; kh++) {
-                        for (int kw = 0; kw < kW; kw++) {
-                            int ih = oh * stride - padding + kh;
-                            int iw = ow * stride - padding + kw;
-
-                            if (ih >= 0 && ih < H && iw >= 0 && iw < W) {
-                                int idx = b * channels * H * W + c * H * W + ih * W + iw;
-                                sum += in[idx];
-                                count++;
-                            }
-                        }
-                    }
-
-                    int out_idx = b * channels * outH * outW + c * outH * outW + oh * outW + ow;
-                    out[out_idx] = sum / count;
-                }
-            }
-        }
-    }
-}
-
-void flux_maxpool2d(float *out, const float *in,
-                    int batch, int channels, int H, int W,
-                    int kH, int kW, int stride, int padding) {
-    int outH = (H + 2 * padding - kH) / stride + 1;
-    int outW = (W + 2 * padding - kW) / stride + 1;
-
-    for (int b = 0; b < batch; b++) {
-        for (int c = 0; c < channels; c++) {
-            for (int oh = 0; oh < outH; oh++) {
-                for (int ow = 0; ow < outW; ow++) {
-                    float max_val = -1e30f;
-
-                    for (int kh = 0; kh < kH; kh++) {
-                        for (int kw = 0; kw < kW; kw++) {
-                            int ih = oh * stride - padding + kh;
-                            int iw = ow * stride - padding + kw;
-
-                            if (ih >= 0 && ih < H && iw >= 0 && iw < W) {
-                                int idx = b * channels * H * W + c * H * W + ih * W + iw;
-                                if (in[idx] > max_val) max_val = in[idx];
-                            }
-                        }
-                    }
-
-                    int out_idx = b * channels * outH * outW + c * outH * outW + oh * outW + ow;
-                    out[out_idx] = max_val;
-                }
-            }
-        }
-    }
-}
-
 void flux_upsample_nearest(float *out, const float *in,
                            int batch, int channels, int H, int W,
                            int scale_h, int scale_w) {
@@ -1335,51 +1026,6 @@ void flux_upsample_nearest(float *out, const float *in,
                     int in_idx = b * channels * H * W + c * H * W + ih * W + iw;
                     int out_idx = b * channels * outH * outW + c * outH * outW + oh * outW + ow;
                     out[out_idx] = in[in_idx];
-                }
-            }
-        }
-    }
-}
-
-void flux_upsample_bilinear(float *out, const float *in,
-                            int batch, int channels, int H, int W,
-                            int out_H, int out_W) {
-    float scale_h = (float)H / out_H;
-    float scale_w = (float)W / out_W;
-
-    for (int b = 0; b < batch; b++) {
-        for (int c = 0; c < channels; c++) {
-            for (int oh = 0; oh < out_H; oh++) {
-                for (int ow = 0; ow < out_W; ow++) {
-                    float ih = (oh + 0.5f) * scale_h - 0.5f;
-                    float iw = (ow + 0.5f) * scale_w - 0.5f;
-
-                    int ih0 = (int)floorf(ih);
-                    int iw0 = (int)floorf(iw);
-                    int ih1 = ih0 + 1;
-                    int iw1 = iw0 + 1;
-
-                    float h_weight = ih - ih0;
-                    float w_weight = iw - iw0;
-
-                    ih0 = (ih0 < 0) ? 0 : (ih0 >= H) ? H - 1 : ih0;
-                    ih1 = (ih1 < 0) ? 0 : (ih1 >= H) ? H - 1 : ih1;
-                    iw0 = (iw0 < 0) ? 0 : (iw0 >= W) ? W - 1 : iw0;
-                    iw1 = (iw1 < 0) ? 0 : (iw1 >= W) ? W - 1 : iw1;
-
-                    int base = b * channels * H * W + c * H * W;
-                    float v00 = in[base + ih0 * W + iw0];
-                    float v01 = in[base + ih0 * W + iw1];
-                    float v10 = in[base + ih1 * W + iw0];
-                    float v11 = in[base + ih1 * W + iw1];
-
-                    float val = v00 * (1 - h_weight) * (1 - w_weight) +
-                                v01 * (1 - h_weight) * w_weight +
-                                v10 * h_weight * (1 - w_weight) +
-                                v11 * h_weight * w_weight;
-
-                    int out_idx = b * channels * out_H * out_W + c * out_H * out_W + oh * out_W + ow;
-                    out[out_idx] = val;
                 }
             }
         }
@@ -1450,63 +1096,4 @@ void flux_unpatchify(float *out, const float *in,
 
 void flux_copy(float *dst, const float *src, int n) {
     memcpy(dst, src, n * sizeof(float));
-}
-
-void flux_fill(float *x, float val, int n) {
-    for (int i = 0; i < n; i++) {
-        x[i] = val;
-    }
-}
-
-float flux_sum(const float *x, int n) {
-    float sum = 0.0f;
-    for (int i = 0; i < n; i++) {
-        sum += x[i];
-    }
-    return sum;
-}
-
-float flux_mean(const float *x, int n) {
-    return flux_sum(x, n) / n;
-}
-
-float flux_var(const float *x, int n) {
-    float mean = flux_mean(x, n);
-    float var = 0.0f;
-    for (int i = 0; i < n; i++) {
-        float diff = x[i] - mean;
-        var += diff * diff;
-    }
-    return var / n;
-}
-
-float flux_norm(const float *x, int n) {
-    float sum = 0.0f;
-    for (int i = 0; i < n; i++) {
-        sum += x[i] * x[i];
-    }
-    return sqrtf(sum);
-}
-
-float flux_dot(const float *a, const float *b, int n) {
-    float sum = 0.0f;
-    for (int i = 0; i < n; i++) {
-        sum += a[i] * b[i];
-    }
-    return sum;
-}
-
-void flux_clamp(float *x, float min_val, float max_val, int n) {
-    for (int i = 0; i < n; i++) {
-        if (x[i] < min_val) x[i] = min_val;
-        else if (x[i] > max_val) x[i] = max_val;
-    }
-}
-
-void flux_transpose(float *out, const float *in, int M, int N) {
-    for (int m = 0; m < M; m++) {
-        for (int n = 0; n < N; n++) {
-            out[n * M + m] = in[m * N + n];
-        }
-    }
 }

@@ -20,16 +20,10 @@ struct flux_image;
 
 /* Element-wise operations */
 void flux_add(float *out, const float *a, const float *b, int n);
-void flux_add_scalar(float *out, const float *a, float s, int n);
-void flux_sub(float *out, const float *a, const float *b, int n);
-void flux_mul(float *out, const float *a, const float *b, int n);
-void flux_mul_scalar(float *out, const float *a, float s, int n);
-void flux_div(float *out, const float *a, const float *b, int n);
 
 /* In-place variants */
 void flux_add_inplace(float *a, const float *b, int n);
 void flux_mul_inplace(float *a, const float *b, int n);
-void flux_scale_inplace(float *a, float s, int n);
 
 /* Accumulate: a += scale * b */
 void flux_axpy(float *a, float scale, const float *b, int n);
@@ -53,12 +47,6 @@ void flux_matmul_t(float *C, const float *A, const float *B,
                    int M, int K, int N);
 
 /*
- * Batched matrix multiplication: C[b] = A[b] @ B[b]
- */
-void flux_batched_matmul(float *C, const float *A, const float *B,
-                         int batch, int M, int K, int N);
-
-/*
  * Linear layer: y = x @ W^T + b (if b != NULL)
  * x: [seq_len, in_dim], W: [out_dim, in_dim], b: [out_dim], y: [seq_len, out_dim]
  */
@@ -66,7 +54,7 @@ void flux_linear(float *y, const float *x, const float *W, const float *b,
                  int seq_len, int in_dim, int out_dim);
 
 /*
- * Linear layer without bias
+ * Linear layer without bias: y = x @ W^T
  */
 void flux_linear_nobias(float *y, const float *x, const float *W,
                         int seq_len, int in_dim, int out_dim);
@@ -74,7 +62,6 @@ void flux_linear_nobias(float *y, const float *x, const float *W,
 /*
  * Linear layer without bias using bf16 weights
  * x: [seq_len, in_dim] (f32), W: [out_dim, in_dim] (bf16), y: [seq_len, out_dim] (f32)
- * Provides 2x memory bandwidth improvement for weight-bound operations.
  */
 void flux_linear_nobias_bf16(float *y, const float *x, const uint16_t *W_bf16,
                              int seq_len, int in_dim, int out_dim);
@@ -98,11 +85,6 @@ void flux_gpu_begin_batch(void);
  */
 void flux_gpu_end_batch(void);
 
-/*
- * Check if GPU batch mode is currently active.
- */
-int flux_gpu_in_batch(void);
-
 /* ========================================================================
  * Convolution Operations
  * ======================================================================== */
@@ -118,30 +100,9 @@ void flux_conv2d(float *out, const float *in, const float *weight, const float *
                  int batch, int in_ch, int out_ch, int H, int W,
                  int kH, int kW, int stride, int padding);
 
-/*
- * Transposed 2D Convolution (for upsampling)
- */
-void flux_conv2d_transpose(float *out, const float *in, const float *weight, const float *bias,
-                           int batch, int in_ch, int out_ch, int H, int W,
-                           int kH, int kW, int stride, int padding, int output_padding);
-
-/*
- * Depthwise separable convolution
- */
-void flux_conv2d_depthwise(float *out, const float *in, const float *weight, const float *bias,
-                           int batch, int channels, int H, int W,
-                           int kH, int kW, int stride, int padding);
-
 /* ========================================================================
  * Normalization
  * ======================================================================== */
-
-/*
- * Layer Normalization
- * x: [seq_len, hidden], gamma/beta: [hidden]
- */
-void flux_layer_norm(float *out, const float *x, const float *gamma, const float *beta,
-                     int seq_len, int hidden, float eps);
 
 /*
  * RMS Normalization (no mean centering, no bias)
@@ -170,23 +131,11 @@ void flux_batch_norm(float *out, const float *x,
  * Activation Functions
  * ======================================================================== */
 
-/* GELU activation (approximate) */
-void flux_gelu(float *x, int n);
-
 /* SiLU / Swish activation: x * sigmoid(x) */
 void flux_silu(float *x, int n);
 
-/* SwiGLU: gate * silu(x) where input is [x, gate] concatenated */
-void flux_swiglu(float *out, const float *x, const float *gate, int n);
-
 /* Softmax over last dimension */
 void flux_softmax(float *x, int rows, int cols);
-
-/* Sigmoid */
-void flux_sigmoid(float *x, int n);
-
-/* Tanh */
-void flux_tanh(float *x, int n);
 
 /* ========================================================================
  * Attention Operations
@@ -203,15 +152,6 @@ void flux_tanh(float *x, int n);
 void flux_attention(float *out, const float *Q, const float *K, const float *V,
                     int batch, int heads, int seq_q, int seq_k, int head_dim,
                     float scale);
-
-/*
- * Attention with mask
- * mask: [seq_q, seq_k] or NULL, 0 = attend, -inf = mask out
- */
-void flux_attention_masked(float *out, const float *Q, const float *K, const float *V,
-                           const float *mask,
-                           int batch, int heads, int seq_q, int seq_k, int head_dim,
-                           float scale);
 
 /*
  * Flash attention - memory-efficient tiled attention.
@@ -246,25 +186,10 @@ void flux_compute_rope_freqs(float *freqs, const int *pos, int seq, int dim, flo
  * Pooling and Reshape
  * ======================================================================== */
 
-/* Average pooling 2D */
-void flux_avgpool2d(float *out, const float *in,
-                    int batch, int channels, int H, int W,
-                    int kH, int kW, int stride, int padding);
-
-/* Max pooling 2D */
-void flux_maxpool2d(float *out, const float *in,
-                    int batch, int channels, int H, int W,
-                    int kH, int kW, int stride, int padding);
-
 /* Upsample with nearest neighbor */
 void flux_upsample_nearest(float *out, const float *in,
                            int batch, int channels, int H, int W,
                            int scale_h, int scale_w);
-
-/* Upsample with bilinear interpolation */
-void flux_upsample_bilinear(float *out, const float *in,
-                            int batch, int channels, int H, int W,
-                            int out_H, int out_W);
 
 /* Patchify: [B, C, H, W] -> [B, C*p*p, H/p, W/p] */
 void flux_patchify(float *out, const float *in,
@@ -299,33 +224,6 @@ void flux_rand(float *out, int n);
 
 /* Copy tensor */
 void flux_copy(float *dst, const float *src, int n);
-
-/* Fill tensor with value */
-void flux_fill(float *x, float val, int n);
-
-/* Sum all elements */
-float flux_sum(const float *x, int n);
-
-/* Mean of all elements */
-float flux_mean(const float *x, int n);
-
-/* Variance of all elements */
-float flux_var(const float *x, int n);
-
-/* L2 norm */
-float flux_norm(const float *x, int n);
-
-/* Dot product */
-float flux_dot(const float *a, const float *b, int n);
-
-/* Clamp values */
-void flux_clamp(float *x, float min_val, float max_val, int n);
-
-/* Transpose 2D: [M, N] -> [N, M] */
-void flux_transpose(float *out, const float *in, int M, int N);
-
-/* Reshape (just changes interpretation, no data movement) */
-/* ... handled at higher level ... */
 
 /* ========================================================================
  * Progress Callbacks
