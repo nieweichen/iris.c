@@ -559,6 +559,14 @@ flux_image *flux_img2img(flux_ctx *ctx, const char *prompt,
     if (p.width <= 0) p.width = input->width;
     if (p.height <= 0) p.height = input->height;
 
+    /* Clamp to VAE max dimensions, preserving aspect ratio */
+    if (p.width > FLUX_VAE_MAX_DIM || p.height > FLUX_VAE_MAX_DIM) {
+        float scale = (float)FLUX_VAE_MAX_DIM /
+                      (p.width > p.height ? p.width : p.height);
+        p.width = (int)(p.width * scale);
+        p.height = (int)(p.height * scale);
+    }
+
     /* Ensure divisible by 16 */
     p.width = (p.width / 16) * 16;
     p.height = (p.height / 16) * 16;

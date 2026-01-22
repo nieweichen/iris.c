@@ -49,6 +49,7 @@ extern "C" {
 #define FLUX_VAE_CH_MULT_3      4
 #define FLUX_VAE_NUM_RES        2
 #define FLUX_VAE_GROUPS         32
+#define FLUX_VAE_MAX_DIM        1024  /* Max image dimension for VAE */
 
 /* Tokenizer */
 #define FLUX_MAX_SEQ_LEN        512
