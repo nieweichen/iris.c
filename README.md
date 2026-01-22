@@ -280,8 +280,8 @@ The MPS implementation matches the PyTorch optimized pipeline performance.
 
 | Size | C (MPS) | PyTorch (MPS) |
 |------|---------|---------------|
-| 256x256 | 14s | 11s |
-| 512x512 | 18s | 13s |
+| 256x256 | 10.5s | 11s |
+| 512x512 | 13s | 13s |
 | 1024x1024 | 29s | 25s |
 
 **Notes:**
