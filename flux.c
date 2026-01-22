@@ -58,6 +58,15 @@ extern float *flux_sample_euler(void *transformer, void *text_encoder,
                                 const float *schedule, int num_steps,
                                 float guidance_scale,
                                 void (*progress_callback)(int step, int total));
+extern float *flux_sample_euler_with_refs(void *transformer, void *text_encoder,
+                                          float *z, int batch, int channels, int h, int w,
+                                          const float *ref_latent, int ref_h, int ref_w,
+                                          int t_offset,
+                                          const float *text_emb, int text_seq,
+                                          const float *null_emb,
+                                          const float *schedule, int num_steps,
+                                          float guidance_scale,
+                                          void (*progress_callback)(int step, int total));
 extern float *flux_linear_schedule(int num_steps);
 extern float *flux_official_schedule(int num_steps, int image_seq_len);
 extern float *flux_init_noise(int batch, int channels, int h, int w, int64_t seed);
@@ -575,6 +584,7 @@ flux_image *flux_img2img(flux_ctx *ctx, const char *prompt,
         return NULL;
     }
 
+
     /* Release text encoder to free ~8GB before loading transformer */
     flux_release_text_encoder(ctx);
 
@@ -609,44 +619,42 @@ flux_image *flux_img2img(flux_ctx *ctx, const char *prompt,
         return NULL;
     }
 
-    /* Add noise based on strength */
-    float strength = p.strength;
-    if (strength < 0) strength = 0;
-    if (strength > 1) strength = 1;
-
     /*
-     * For distilled models like FLUX klein (4-step), we should always use
-     * the full number of steps. The strength controls how much noise is added
-     * to the image, not how many steps are skipped.
+     * FLUX.2 img2img uses in-context conditioning:
+     * - Reference image is encoded to latent with T offset in RoPE (T=10)
+     * - Target image starts from pure noise (T=0)
+     * - Both are concatenated as tokens in the transformer
+     * - Model attends to reference via joint attention
+     * - Only target tokens are output
      *
-     * Approach: Use the full schedule, but start the latent at the noise
-     * level corresponding to strength.
+     * This is fundamentally different from traditional img2img that adds
+     * noise directly to the encoded image.
      */
     int num_steps = p.num_steps;
-    float *schedule = flux_linear_schedule(num_steps);
+    int image_seq_len = latent_h * latent_w;  /* For schedule calculation */
 
-    /* The noise level to add matches strength */
-    float t_start = strength;
+    /* Use official FLUX.2 schedule */
+    float *schedule = flux_official_schedule(num_steps, image_seq_len);
 
-    /* Add noise to match t_start level */
-    int latent_size = FLUX_LATENT_CHANNELS * latent_h * latent_w;
+    /* Initialize target latent with pure noise */
     int64_t seed = (p.seed < 0) ? (int64_t)time(NULL) : p.seed;
-    flux_rng_seed((uint64_t)seed);
+    float *z = flux_init_noise(1, FLUX_LATENT_CHANNELS, latent_h, latent_w, seed);
 
-    for (int i = 0; i < latent_size; i++) {
-        float noise = flux_random_normal();
-        img_latent[i] = (1.0f - t_start) * img_latent[i] + t_start * noise;
-    }
+    /* Reference image latent is img_latent, with T offset = 10 */
+    int t_offset = 10;
 
-    /* Sample */
-    float *latent = flux_sample_euler(
+    /* Sample using in-context conditioning */
+    float *latent = flux_sample_euler_with_refs(
         ctx->transformer, ctx->qwen3_encoder,
-        img_latent, 1, FLUX_LATENT_CHANNELS, latent_h, latent_w,
+        z, 1, FLUX_LATENT_CHANNELS, latent_h, latent_w,
+        img_latent, latent_h, latent_w,  /* Reference latent */
+        t_offset,
         text_emb, text_seq, NULL,
         schedule, num_steps,
         p.guidance_scale, NULL
     );
 
+    free(z);
     free(img_latent);
     free(schedule);
     free(text_emb);
@@ -743,4 +751,114 @@ float *flux_denoise_step(flux_ctx *ctx, const float *z, float t,
     return flux_transformer_forward(ctx->transformer,
                                     z, latent_h, latent_w,
                                     text_emb, text_len, t);
+}
+
+/* Debug function: img2img with external inputs from Python */
+flux_image *flux_img2img_debug_py(flux_ctx *ctx, const flux_params *params) {
+    if (!ctx) {
+        set_error("Invalid context");
+        return NULL;
+    }
+
+    flux_params p;
+    if (params) {
+        p = *params;
+    } else {
+        p = (flux_params)FLUX_PARAMS_DEFAULT;
+    }
+
+    /* Load Python's noise */
+    FILE *f_noise = fopen("/tmp/py_noise.bin", "rb");
+    if (!f_noise) {
+        set_error("Cannot open /tmp/py_noise.bin");
+        return NULL;
+    }
+    fseek(f_noise, 0, SEEK_END);
+    int noise_size = ftell(f_noise) / sizeof(float);
+    fseek(f_noise, 0, SEEK_SET);
+    float *noise = (float *)malloc(noise_size * sizeof(float));
+    fread(noise, sizeof(float), noise_size, f_noise);
+    fclose(f_noise);
+    fprintf(stderr, "[DEBUG] Loaded noise: %d floats\n", noise_size);
+
+    /* Load Python's ref_latent */
+    FILE *f_ref = fopen("/tmp/py_ref_latent.bin", "rb");
+    if (!f_ref) {
+        free(noise);
+        set_error("Cannot open /tmp/py_ref_latent.bin");
+        return NULL;
+    }
+    fseek(f_ref, 0, SEEK_END);
+    int ref_size = ftell(f_ref) / sizeof(float);
+    fseek(f_ref, 0, SEEK_SET);
+    float *ref_latent = (float *)malloc(ref_size * sizeof(float));
+    fread(ref_latent, sizeof(float), ref_size, f_ref);
+    fclose(f_ref);
+    fprintf(stderr, "[DEBUG] Loaded ref_latent: %d floats\n", ref_size);
+
+    /* Load Python's text_emb */
+    FILE *f_txt = fopen("/tmp/py_text_emb.bin", "rb");
+    if (!f_txt) {
+        free(noise);
+        free(ref_latent);
+        set_error("Cannot open /tmp/py_text_emb.bin");
+        return NULL;
+    }
+    fseek(f_txt, 0, SEEK_END);
+    int txt_size = ftell(f_txt) / sizeof(float);
+    fseek(f_txt, 0, SEEK_SET);
+    float *text_emb = (float *)malloc(txt_size * sizeof(float));
+    fread(text_emb, sizeof(float), txt_size, f_txt);
+    fclose(f_txt);
+    int text_seq = 512;
+    fprintf(stderr, "[DEBUG] Loaded text_emb: %d floats (%d x %d)\n",
+            txt_size, text_seq, txt_size / text_seq);
+
+    /* Load transformer */
+    if (!flux_load_transformer_if_needed(ctx)) {
+        free(noise);
+        free(ref_latent);
+        free(text_emb);
+        return NULL;
+    }
+
+    /* Dimensions */
+    int latent_h = p.height / 16;
+    int latent_w = p.width / 16;
+    int image_seq_len = latent_h * latent_w;
+
+    /* Get schedule */
+    float *schedule = flux_official_schedule(p.num_steps, image_seq_len);
+
+    /* Sample with refs */
+    float *latent = flux_sample_euler_with_refs(
+        ctx->transformer, NULL,
+        noise, 1, FLUX_LATENT_CHANNELS, latent_h, latent_w,
+        ref_latent, latent_h, latent_w,
+        10,  /* t_offset */
+        text_emb, text_seq, NULL,
+        schedule, p.num_steps,
+        p.guidance_scale, NULL
+    );
+
+    free(noise);
+    free(ref_latent);
+    free(schedule);
+    free(text_emb);
+
+    if (!latent) {
+        set_error("Sampling failed");
+        return NULL;
+    }
+
+    /* Decode */
+    flux_image *result = NULL;
+    if (ctx->vae) {
+        if (flux_phase_callback) flux_phase_callback("decoding image", 0);
+        result = flux_vae_decode(ctx->vae, latent, 1, latent_h, latent_w);
+        if (flux_phase_callback) flux_phase_callback("decoding image", 1);
+    }
+
+    free(latent);
+    return result;
 }

@@ -254,6 +254,7 @@ int main(int argc, char *argv[]) {
         {"help",       no_argument,       0, 'h'},
         {"version",    no_argument,       0, 'V'},
         {"mmap",       no_argument,       0, 'm'},
+        {"debug-py",   no_argument,       0, 'D'},
         {0, 0, 0, 0}
     };
 
@@ -276,9 +277,10 @@ int main(int argc, char *argv[]) {
 
     int width_set = 0, height_set = 0;
     int use_mmap = 0;
+    int debug_py = 0;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "d:p:o:W:H:s:g:S:i:t:e:n:qvhVm",
+    while ((opt = getopt_long(argc, argv, "d:p:o:W:H:s:g:S:i:t:e:n:qvhVmD",
                               long_options, NULL)) != -1) {
         switch (opt) {
             case 'd': model_dir = optarg; break;
@@ -300,6 +302,7 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "FLUX.2 klein 4B v1.0.0\n");
                 return 0;
             case 'm': use_mmap = 1; break;
+            case 'D': debug_py = 1; break;
             default:
                 print_usage(argv[0]);
                 return 1;
@@ -312,7 +315,7 @@ int main(int argc, char *argv[]) {
         print_usage(argv[0]);
         return 1;
     }
-    if (!prompt && !embeddings_path) {
+    if (!prompt && !embeddings_path && !debug_py) {
         fprintf(stderr, "Error: Prompt (-p) or embeddings file (-e) is required\n\n");
         print_usage(argv[0]);
         return 1;
@@ -396,7 +399,11 @@ int main(int argc, char *argv[]) {
     struct timeval total_start_tv;
     gettimeofday(&total_start_tv, NULL);
 
-    if (input_path) {
+    if (debug_py) {
+        /* ============== Debug mode: use Python inputs ============== */
+        LOG_NORMAL("Debug mode: loading Python inputs from /tmp/py_*.bin\n");
+        output = flux_img2img_debug_py(ctx, &params);
+    } else if (input_path) {
         /* ============== Image-to-image mode ============== */
         LOG_NORMAL("Loading input image...");
         if (output_level >= OUTPUT_NORMAL) fflush(stderr);

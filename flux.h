@@ -144,6 +144,12 @@ flux_image *flux_multiref(flux_ctx *ctx, const char *prompt,
                           const flux_params *params);
 
 /*
+ * Debug: img2img using Python's exact inputs from /tmp/py_*.bin files.
+ * Used for comparing C and Python implementations.
+ */
+flux_image *flux_img2img_debug_py(flux_ctx *ctx, const flux_params *params);
+
+/*
  * Text-to-image generation with pre-computed embeddings.
  * text_emb: float array of shape [text_seq, FLUX_TEXT_DIM]
  * text_seq: number of text tokens (typically 512)

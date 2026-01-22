@@ -106,7 +106,9 @@ typedef struct flux_vae {
     float *bn_var;          /* [128] */
 
     /* Post-quantization conv (1x1) applied before decoder */
-    float *post_quant_conv_weight;  /* [32, 32, 1, 1] */
+    float *quant_conv_weight;       /* [64, 64, 1, 1] - encoder */
+    float *quant_conv_bias;         /* [64] */
+    float *post_quant_conv_weight;  /* [32, 32, 1, 1] - decoder */
     float *post_quant_conv_bias;    /* [32] */
 
     /* Working memory (allocated for max image size) */
@@ -364,6 +366,11 @@ float *flux_vae_encode(flux_vae_t *vae, const float *img,
     int z_ch = vae->z_channels * 2;  /* 64 */
     vae_conv2d(x, work, vae->enc_conv_out_weight, vae->enc_conv_out_bias,
                 batch, mid_ch, z_ch, cur_h, cur_w, 3, 3, 1, 1);
+
+    /* Quant conv: 64 -> 64 (1x1 conv) */
+    vae_conv2d(work, x, vae->quant_conv_weight, vae->quant_conv_bias,
+               batch, z_ch, z_ch, cur_h, cur_w, 1, 1, 1, 0);
+    flux_copy(x, work, batch * z_ch * cur_h * cur_w);
 
     /* Take mean only (first 32 channels) */
     /* x is [B, 64, H/8, W/8], we want [B, 32, H/8, W/8] */
@@ -752,6 +759,8 @@ void flux_vae_free(flux_vae_t *vae) {
     free(vae->enc_norm_out_bias);
     free(vae->enc_conv_out_weight);
     free(vae->enc_conv_out_bias);
+    free(vae->quant_conv_weight);
+    free(vae->quant_conv_bias);
 
     free(vae->dec_conv_in_weight);
     free(vae->dec_conv_in_bias);
@@ -982,6 +991,8 @@ flux_vae_t *flux_vae_load_safetensors(safetensors_file_t *sf) {
     vae->enc_norm_out_bias = get_sf_tensor(sf, "encoder.conv_norm_out.bias");
     vae->enc_conv_out_weight = get_sf_tensor(sf, "encoder.conv_out.weight");
     vae->enc_conv_out_bias = get_sf_tensor(sf, "encoder.conv_out.bias");
+    vae->quant_conv_weight = get_sf_tensor(sf, "quant_conv.weight");
+    vae->quant_conv_bias = get_sf_tensor(sf, "quant_conv.bias");
 
     /* Decoder conv_in */
     vae->dec_conv_in_weight = get_sf_tensor(sf, "decoder.conv_in.weight");

@@ -161,6 +161,14 @@ extern float *flux_transformer_forward(flux_transformer_t *tf,
                                        const float *txt_emb, int txt_seq,
                                        float timestep);
 
+/* Forward declaration for in-context conditioning (img2img) */
+extern float *flux_transformer_forward_with_refs(flux_transformer_t *tf,
+                                                 const float *img_latent, int img_h, int img_w,
+                                                 const float *ref_latent, int ref_h, int ref_w,
+                                                 int t_offset,
+                                                 const float *txt_emb, int txt_seq,
+                                                 float timestep);
+
 /*
  * Sample using Euler method.
  *
@@ -250,6 +258,83 @@ float *flux_sample_euler(void *transformer, void *text_encoder,
     fprintf(stderr, "    Final layer:   %.1f ms (%.1f%%)\n",
             flux_timing_transformer_final, 100.0 * flux_timing_transformer_final / flux_timing_transformer_total);
     fprintf(stderr, "    Total:         %.1f ms\n", flux_timing_transformer_total);
+
+    return z_curr;
+}
+
+/*
+ * Sample using Euler method with in-context conditioning for img2img.
+ *
+ * This implements FLUX.2's approach where reference images are passed
+ * as additional tokens with a distinct T coordinate in RoPE, allowing
+ * the model to attend to them during generation.
+ *
+ * z: initial noise [batch, channels, h, w] - target image starts as pure noise
+ * ref_latent: reference image in latent space [channels, ref_h, ref_w]
+ * t_offset: RoPE T coordinate for reference (10 for first ref, 20 for second, etc.)
+ */
+float *flux_sample_euler_with_refs(void *transformer, void *text_encoder,
+                                   float *z, int batch, int channels, int h, int w,
+                                   const float *ref_latent, int ref_h, int ref_w,
+                                   int t_offset,
+                                   const float *text_emb, int text_seq,
+                                   const float *null_emb,
+                                   const float *schedule, int num_steps,
+                                   float guidance_scale,
+                                   void (*progress_callback)(int step, int total)) {
+    (void)text_encoder;  /* Reserved for future use */
+    (void)null_emb;      /* CFG not typically used with img2img */
+    (void)guidance_scale;
+    flux_transformer_t *tf = (flux_transformer_t *)transformer;
+    int latent_size = batch * channels * h * w;
+
+    /* Working buffer */
+    float *z_curr = (float *)malloc(latent_size * sizeof(float));
+    flux_copy(z_curr, z, latent_size);
+
+    /* Reset timing counters */
+    flux_reset_timing();
+    double total_denoising_start = get_time_ms();
+    double step_times[64];
+
+    for (int step = 0; step < num_steps; step++) {
+        float t_curr = schedule[step];
+        float t_next = schedule[step + 1];
+        float dt = t_next - t_curr;
+
+        double step_start = get_time_ms();
+
+        /* Notify step start */
+        if (flux_step_callback)
+            flux_step_callback(step + 1, num_steps);
+
+        /* Predict velocity with reference image conditioning */
+        float *v = flux_transformer_forward_with_refs(tf,
+                                                      z_curr, h, w,
+                                                      ref_latent, ref_h, ref_w,
+                                                      t_offset,
+                                                      text_emb, text_seq,
+                                                      t_curr);
+
+        /* Euler step: z_next = z_curr + dt * v */
+        flux_axpy(z_curr, dt, v, latent_size);
+
+        free(v);
+
+        step_times[step] = get_time_ms() - step_start;
+
+        if (progress_callback) {
+            progress_callback(step + 1, num_steps);
+        }
+    }
+
+    /* Print timing summary */
+    double total_denoising = get_time_ms() - total_denoising_start;
+    fprintf(stderr, "\nDenoising timing breakdown (img2img with refs):\n");
+    for (int step = 0; step < num_steps; step++) {
+        fprintf(stderr, "  Step %d: %.1f ms\n", step + 1, step_times[step]);
+    }
+    fprintf(stderr, "  Total denoising: %.1f ms (%.2f s)\n", total_denoising, total_denoising / 1000.0);
 
     return z_curr;
 }
