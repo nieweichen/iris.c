@@ -107,7 +107,7 @@ FLUX.2 uses **in-context conditioning** for image-to-image generation. Unlike tr
 -h, --help            Show help
 ```
 
-### Reproducibility
+## Reproducibility
 
 The seed is always printed to stderr, even when random:
 ```
@@ -122,7 +122,7 @@ To reproduce the same image, use the printed seed:
 $ ./flux -d flux-klein-model -p "a landscape" -o out.png -S 1705612345
 ```
 
-### PNG Metadata
+## PNG Metadata
 
 Generated PNG images include metadata with the seed and model information, so you can always recover the seed even if you didn't save the terminal output:
 
@@ -214,9 +214,32 @@ This downloads approximately 16GB to `./flux-klein-model`:
 - Qwen3-4B Text Encoder (~8GB)
 - Tokenizer
 
-## Technical Details
+## How Fast Is It?
 
-### Model Architecture
+Benchmarks on **Apple M3 Max** (128GB RAM), generating a 4-step image.
+
+The MPS implementation matches the PyTorch optimized pipeline performance.
+
+| Size | C (MPS) | PyTorch (MPS) |
+|------|---------|---------------|
+| 256x256 | 10.5s | 11s |
+| 512x512 | 13s | 13s |
+| 1024x1024 | 29s | 25s |
+
+**Notes:**
+- All times measured as wall clock, including model loading, no warmup. PyTorch times exclude library import overhead (~5-10s) to be fair.
+- The C BLAS backend (CPU) is not shown.
+- The `make generic` backend (pure C, no BLAS) is approximately 30x slower than BLAS and not included in benchmarks.
+
+## Resolution Limits
+
+**Maximum resolution**: 1024x1024 pixels. Higher resolutions require prohibitive memory for the attention mechanisms.
+
+**Minimum resolution**: 64x64 pixels.
+
+Dimensions should be multiples of 16 (the VAE downsampling factor).
+
+## Model Architecture
 
 **FLUX.2-klein-4B** is a rectified flow transformer optimized for fast inference:
 
@@ -228,7 +251,7 @@ This downloads approximately 16GB to `./flux-klein-model`:
 
 **Inference steps**: This is a distilled model that produces good results with exactly 4 sampling steps.
 
-### Memory Requirements
+## Memory Requirements
 
 With mmap (default):
 
@@ -248,7 +271,7 @@ With `--no-mmap` (all weights in RAM):
 
 The text encoder is automatically released after encoding, reducing peak memory during diffusion. If you generate multiple images with different prompts, the encoder reloads automatically.
 
-### Memory-Mapped Weights (Default)
+## Memory-Mapped Weights (Default)
 
 Memory-mapped weight loading is enabled by default. Use `--no-mmap` to disable and load all weights upfront.
 
@@ -271,31 +294,6 @@ This reduces peak memory from ~16GB to ~4-5GB, making inference possible on 16GB
 - **BLAS (CPU):** mmap is **slightly slower** but uses much less RAM. BLAS requires f32 weights, so each block must be converted from bf16→f32 on every step (25 blocks × 4 steps = 100 conversions). With `--no-mmap`, this conversion happens once at startup. **Recommendation:** If you have 32GB+ RAM and use BLAS, try `--no-mmap` for faster inference. If RAM is limited, mmap lets you run at all.
 
 - **Generic (pure C):** Same tradeoffs as BLAS, but slower overall.
-
-### How Fast Is It?
-
-Benchmarks on **Apple M3 Max** (128GB RAM), generating a 4-step image.
-
-The MPS implementation matches the PyTorch optimized pipeline performance.
-
-| Size | C (MPS) | PyTorch (MPS) |
-|------|---------|---------------|
-| 256x256 | 10.5s | 11s |
-| 512x512 | 13s | 13s |
-| 1024x1024 | 29s | 25s |
-
-**Notes:**
-- All times measured as wall clock, including model loading, no warmup. PyTorch times exclude library import overhead (~5-10s) to be fair.
-- The C BLAS backend (CPU) is not shown.
-- The `make generic` backend (pure C, no BLAS) is approximately 30x slower than BLAS and not included in benchmarks.
-
-### Resolution Limits
-
-**Maximum resolution**: 1024x1024 pixels. Higher resolutions require prohibitive memory for the attention mechanisms.
-
-**Minimum resolution**: 64x64 pixels.
-
-Dimensions should be multiples of 16 (the VAE downsampling factor).
 
 ## C Library API
 
