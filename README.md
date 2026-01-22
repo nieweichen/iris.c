@@ -49,13 +49,19 @@ That's it. No Python runtime or CUDA toolkit required at inference time.
 Transform an existing image based on a prompt:
 
 ```bash
-./flux -d flux-klein-model -p "oil painting style" -i photo.png -o painting.png -t 0.7
+./flux -d flux-klein-model -p "oil painting style" -i photo.png -o painting.png
 ```
 
-The `-t` (strength) parameter controls how much the image changes:
-- `0.0` = no change (output equals input)
-- `1.0` = full generation (input only provides composition hint)
-- `0.7` = good balance for style transfer
+FLUX.2 uses **in-context conditioning** for image-to-image generation. Unlike traditional approaches that add noise to the input image, FLUX.2 passes the reference image as additional tokens that the model can attend to during generation. This means:
+
+- The model "sees" your input image and uses it as a reference
+- The prompt describes what you want the output to look like
+- Results tend to preserve the composition while applying the described transformation
+
+**Tips for good results:**
+- Use descriptive prompts that describe the desired output, not instructions
+- Good: `"oil painting of a woman with sunglasses, impressionist style"`
+- Less good: `"make it an oil painting"` (instructional prompts may work less well)
 
 ### Command Line Options
 
@@ -78,7 +84,6 @@ The `-t` (strength) parameter controls how much the image changes:
 **Image-to-image options:**
 ```
 -i, --input PATH      Input image for img2img
--t, --strength N      How much to change the image, 0.0-1.0 (default: 0.75)
 ```
 
 **Output options:**
@@ -326,7 +331,7 @@ gcc -o myapp myapp.c -L. -lflux -lm -lopenblas              # Linux
 
 ### Image-to-Image Transformation
 
-Transform an existing image guided by a text prompt. The `strength` parameter controls how much the image changes:
+Transform an existing image guided by a text prompt using in-context conditioning:
 
 ```c
 #include "flux.h"
@@ -346,11 +351,10 @@ int main(void) {
 
     /* Set up parameters. Output size defaults to input size. */
     flux_params params = FLUX_PARAMS_DEFAULT;
-    params.strength = 0.7;  /* 0.0 = no change, 1.0 = full regeneration */
     params.seed = 123;
 
-    /* Transform the image */
-    flux_image *painting = flux_img2img(ctx, "oil painting, impressionist style",
+    /* Transform the image - describe the desired output */
+    flux_image *painting = flux_img2img(ctx, "oil painting of the scene, impressionist style",
                                          photo, &params);
     flux_image_free(photo);  /* Done with input */
 
@@ -367,13 +371,6 @@ int main(void) {
     flux_free(ctx);
     return 0;
 }
-```
-
-**Strength values:**
-- `0.3` - Subtle style transfer, preserves most details
-- `0.5` - Moderate transformation
-- `0.7` - Strong transformation, good for style transfer
-- `0.9` - Almost complete regeneration, keeps only composition
 
 ### Generating Multiple Images
 
@@ -458,6 +455,54 @@ typedef struct {
 /* Initialize with sensible defaults */
 #define FLUX_PARAMS_DEFAULT { 256, 256, 4, 1.0f, -1, 0.75f }
 ```
+
+## Debugging
+
+### Comparing with Python Reference
+
+When debugging img2img issues, the `--debug-py` flag allows you to run the C implementation with exact inputs saved from a Python reference script. This isolates whether differences are due to input preparation (VAE encoding, text encoding, noise generation) or the transformer itself.
+
+**Setup:**
+
+1. Set up the Python environment:
+```bash
+python -m venv flux_env
+source flux_env/bin/activate
+pip install torch diffusers transformers safetensors einops huggingface_hub
+```
+
+2. Clone the flux2 reference (for the model class):
+```bash
+git clone https://github.com/black-forest-labs/flux flux2
+```
+
+3. Run the Python debug script to save inputs:
+```bash
+python debug/debug_img2img_compare.py
+```
+
+This saves to `/tmp/`:
+- `py_noise.bin` - Initial noise tensor
+- `py_ref_latent.bin` - VAE-encoded reference image
+- `py_text_emb.bin` - Text embeddings from Qwen3
+
+4. Run C with the same inputs:
+```bash
+./flux -d flux-klein-model --debug-py -W 256 -H 256 --steps 4 -o /tmp/c_debug.png
+```
+
+5. Compare the outputs visually or numerically.
+
+**What this helps diagnose:**
+- If C and Python produce identical outputs with identical inputs, any differences in normal operation are due to input preparation (VAE, text encoder, RNG)
+- If outputs differ even with identical inputs, the issue is in the transformer or sampling implementation
+
+### Debug Scripts
+
+The `debug/` directory contains Python scripts for comparing C and Python implementations:
+
+- `debug_img2img_compare.py` - Full img2img comparison with step-by-step statistics
+- `debug_rope_img2img.py` - Verify RoPE position encoding matches between C and Python
 
 ## License
 
