@@ -403,6 +403,13 @@ uint16_t *safetensors_get_bf16(const safetensors_file_t *sf, const safetensor_t 
     return out;
 }
 
+/* Get direct pointer to bf16 data in mmap'd region (no copy, caller must not free) */
+uint16_t *safetensors_get_bf16_direct(const safetensors_file_t *sf, const safetensor_t *t) {
+    if (!sf || !t) return NULL;
+    if (t->dtype != DTYPE_BF16) return NULL;
+    return (uint16_t *)safetensors_data(sf, t);
+}
+
 void safetensor_print(const safetensor_t *t) {
     const char *dtype_names[] = {"F32", "F16", "BF16", "I32", "I64", "BOOL"};
     const char *dtype_name = t->dtype >= 0 && t->dtype <= 5 ?

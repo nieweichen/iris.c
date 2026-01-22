@@ -288,12 +288,13 @@ static float *mmap_get_f32(safetensors_file_t *sf, const char *name) {
     return safetensors_get_f32(sf, t);
 }
 
-/* Helper to get tensor as bf16 (used by mmap load functions) */
+/* Helper to get tensor as bf16 direct pointer (used by mmap load functions)
+ * Returns pointer into mmap'd region - caller must NOT free */
 static uint16_t *mmap_get_bf16(safetensors_file_t *sf, const char *name) {
     const safetensor_t *t = safetensors_find(sf, name);
     if (!t) return NULL;
     if (!safetensor_is_bf16(t)) return NULL;
-    return safetensors_get_bf16(sf, t);
+    return safetensors_get_bf16_direct(sf, t);
 }
 
 /* Load weights for a single double_block on-demand */
@@ -335,11 +336,9 @@ static int load_double_block_weights(double_block_t *b, safetensors_file_t *sf,
     if (use_bf16) {
         uint16_t *ff_in_bf16 = mmap_get_bf16(sf, name);
         if (ff_in_bf16) {
-            b->img_mlp_gate_weight_bf16 = malloc(mlp * h * sizeof(uint16_t));
-            b->img_mlp_up_weight_bf16 = malloc(mlp * h * sizeof(uint16_t));
-            memcpy(b->img_mlp_gate_weight_bf16, ff_in_bf16, mlp * h * sizeof(uint16_t));
-            memcpy(b->img_mlp_up_weight_bf16, ff_in_bf16 + mlp * h, mlp * h * sizeof(uint16_t));
-            free(ff_in_bf16);
+            /* Direct pointers with offset - no malloc/copy needed */
+            b->img_mlp_gate_weight_bf16 = ff_in_bf16;
+            b->img_mlp_up_weight_bf16 = ff_in_bf16 + (size_t)mlp * h;
         }
     }
 
@@ -381,11 +380,9 @@ static int load_double_block_weights(double_block_t *b, safetensors_file_t *sf,
     if (use_bf16) {
         uint16_t *txt_ff_in_bf16 = mmap_get_bf16(sf, name);
         if (txt_ff_in_bf16) {
-            b->txt_mlp_gate_weight_bf16 = malloc(mlp * h * sizeof(uint16_t));
-            b->txt_mlp_up_weight_bf16 = malloc(mlp * h * sizeof(uint16_t));
-            memcpy(b->txt_mlp_gate_weight_bf16, txt_ff_in_bf16, mlp * h * sizeof(uint16_t));
-            memcpy(b->txt_mlp_up_weight_bf16, txt_ff_in_bf16 + mlp * h, mlp * h * sizeof(uint16_t));
-            free(txt_ff_in_bf16);
+            /* Direct pointers with offset - no malloc/copy needed */
+            b->txt_mlp_gate_weight_bf16 = txt_ff_in_bf16;
+            b->txt_mlp_up_weight_bf16 = txt_ff_in_bf16 + (size_t)mlp * h;
         }
     }
 
@@ -396,7 +393,8 @@ static int load_double_block_weights(double_block_t *b, safetensors_file_t *sf,
     return 0;
 }
 
-/* Free weights for a single double_block */
+/* Free weights for a single double_block (mmap mode only)
+ * Note: bf16 pointers are direct mmap pointers, don't free them */
 static void free_double_block_weights(double_block_t *b) {
     free(b->img_norm_q_weight); b->img_norm_q_weight = NULL;
     free(b->img_norm_k_weight); b->img_norm_k_weight = NULL;
@@ -407,13 +405,14 @@ static void free_double_block_weights(double_block_t *b) {
     free(b->img_mlp_gate_weight); b->img_mlp_gate_weight = NULL;
     free(b->img_mlp_up_weight); b->img_mlp_up_weight = NULL;
     free(b->img_mlp_down_weight); b->img_mlp_down_weight = NULL;
-    free(b->img_q_weight_bf16); b->img_q_weight_bf16 = NULL;
-    free(b->img_k_weight_bf16); b->img_k_weight_bf16 = NULL;
-    free(b->img_v_weight_bf16); b->img_v_weight_bf16 = NULL;
-    free(b->img_proj_weight_bf16); b->img_proj_weight_bf16 = NULL;
-    free(b->img_mlp_gate_weight_bf16); b->img_mlp_gate_weight_bf16 = NULL;
-    free(b->img_mlp_up_weight_bf16); b->img_mlp_up_weight_bf16 = NULL;
-    free(b->img_mlp_down_weight_bf16); b->img_mlp_down_weight_bf16 = NULL;
+    /* bf16 pointers are direct mmap pointers - just clear, don't free */
+    b->img_q_weight_bf16 = NULL;
+    b->img_k_weight_bf16 = NULL;
+    b->img_v_weight_bf16 = NULL;
+    b->img_proj_weight_bf16 = NULL;
+    b->img_mlp_gate_weight_bf16 = NULL;
+    b->img_mlp_up_weight_bf16 = NULL;
+    b->img_mlp_down_weight_bf16 = NULL;
     free(b->txt_norm_q_weight); b->txt_norm_q_weight = NULL;
     free(b->txt_norm_k_weight); b->txt_norm_k_weight = NULL;
     free(b->txt_q_weight); b->txt_q_weight = NULL;
@@ -423,13 +422,14 @@ static void free_double_block_weights(double_block_t *b) {
     free(b->txt_mlp_gate_weight); b->txt_mlp_gate_weight = NULL;
     free(b->txt_mlp_up_weight); b->txt_mlp_up_weight = NULL;
     free(b->txt_mlp_down_weight); b->txt_mlp_down_weight = NULL;
-    free(b->txt_q_weight_bf16); b->txt_q_weight_bf16 = NULL;
-    free(b->txt_k_weight_bf16); b->txt_k_weight_bf16 = NULL;
-    free(b->txt_v_weight_bf16); b->txt_v_weight_bf16 = NULL;
-    free(b->txt_proj_weight_bf16); b->txt_proj_weight_bf16 = NULL;
-    free(b->txt_mlp_gate_weight_bf16); b->txt_mlp_gate_weight_bf16 = NULL;
-    free(b->txt_mlp_up_weight_bf16); b->txt_mlp_up_weight_bf16 = NULL;
-    free(b->txt_mlp_down_weight_bf16); b->txt_mlp_down_weight_bf16 = NULL;
+    /* bf16 pointers are direct mmap pointers - just clear, don't free */
+    b->txt_q_weight_bf16 = NULL;
+    b->txt_k_weight_bf16 = NULL;
+    b->txt_v_weight_bf16 = NULL;
+    b->txt_proj_weight_bf16 = NULL;
+    b->txt_mlp_gate_weight_bf16 = NULL;
+    b->txt_mlp_up_weight_bf16 = NULL;
+    b->txt_mlp_down_weight_bf16 = NULL;
 }
 
 /* Load weights for a single single_block on-demand */
@@ -457,14 +457,16 @@ static int load_single_block_weights(single_block_t *b, safetensors_file_t *sf,
     return 0;
 }
 
-/* Free weights for a single single_block */
+/* Free weights for a single single_block (mmap mode only)
+ * Note: bf16 pointers are direct mmap pointers, don't free them */
 static void free_single_block_weights(single_block_t *b) {
     free(b->norm_q_weight); b->norm_q_weight = NULL;
     free(b->norm_k_weight); b->norm_k_weight = NULL;
     free(b->qkv_mlp_weight); b->qkv_mlp_weight = NULL;
     free(b->proj_mlp_weight); b->proj_mlp_weight = NULL;
-    free(b->qkv_mlp_weight_bf16); b->qkv_mlp_weight_bf16 = NULL;
-    free(b->proj_mlp_weight_bf16); b->proj_mlp_weight_bf16 = NULL;
+    /* bf16 pointers are direct mmap pointers - just clear, don't free */
+    b->qkv_mlp_weight_bf16 = NULL;
+    b->proj_mlp_weight_bf16 = NULL;
 }
 
 /* ========================================================================
