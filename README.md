@@ -88,6 +88,14 @@ FLUX.2 uses **in-context conditioning** for image-to-image generation. Unlike tr
 - Good: `"oil painting of a woman with sunglasses, impressionist style"`
 - Less good: `"make it an oil painting"` (instructional prompts may work less well)
 
+**Super Resolution:** Since the reference image can be a different size than the output, you can use img2img for upscaling:
+
+```bash
+./flux -d flux-klein-model -i small.png -W 1024 -H 1024 -o big.png -p "Create an exact copy of the input image."
+```
+
+The model will generate a higher-resolution version while preserving the composition and details of the input.
+
 ### Multi-Reference Generation
 
 Combine elements from multiple reference images:
