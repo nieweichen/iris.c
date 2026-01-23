@@ -15,7 +15,6 @@
  *   -s, --steps N         Number of sampling steps (default: 4)
  *   -S, --seed N          Random seed (-1 for random)
  *   -i, --input PATH      Input image for img2img
- *   -t, --strength N      Img2img strength (0.0-1.0)
  *   -q, --quiet           No output, just generate
  *   -v, --verbose         Extra detailed output
  *   -h, --help            Show help
@@ -198,7 +197,6 @@ static double timer_end(void) {
 #define DEFAULT_WIDTH 256
 #define DEFAULT_HEIGHT 256
 #define DEFAULT_STEPS 4
-#define DEFAULT_STRENGTH 0.75f
 
 static void print_usage(const char *prog) {
     fprintf(stderr, "FLUX.2 klein 4B - Pure C Image Generation\n\n");
@@ -213,8 +211,7 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  -s, --steps N         Sampling steps (default: %d)\n", DEFAULT_STEPS);
     fprintf(stderr, "  -S, --seed N          Random seed (-1 for random)\n\n");
     fprintf(stderr, "Image-to-image options:\n");
-    fprintf(stderr, "  -i, --input PATH      Input image for img2img\n");
-    fprintf(stderr, "  -t, --strength N      Strength 0.0-1.0 (default: %.2f)\n\n", DEFAULT_STRENGTH);
+    fprintf(stderr, "  -i, --input PATH      Input image for img2img\n\n");
     fprintf(stderr, "Output options:\n");
     fprintf(stderr, "  -q, --quiet           Silent mode, no output\n");
     fprintf(stderr, "  -v, --verbose         Detailed output\n");
@@ -227,7 +224,7 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  -h, --help            Show this help\n\n");
     fprintf(stderr, "Examples:\n");
     fprintf(stderr, "  %s -d model/ -p \"a cat on a rainbow\" -o cat.png\n", prog);
-    fprintf(stderr, "  %s -d model/ -p \"oil painting\" -i photo.png -o art.png -t 0.7\n", prog);
+    fprintf(stderr, "  %s -d model/ -p \"oil painting\" -i photo.png -o art.png\n", prog);
 }
 
 /* ========================================================================
@@ -253,7 +250,6 @@ int main(int argc, char *argv[]) {
         {"steps",      required_argument, 0, 's'},
         {"seed",       required_argument, 0, 'S'},
         {"input",      required_argument, 0, 'i'},
-        {"strength",   required_argument, 0, 't'},
         {"embeddings", required_argument, 0, 'e'},
         {"noise",      required_argument, 0, 'n'},
         {"quiet",      no_argument,       0, 'q'},
@@ -280,8 +276,7 @@ int main(int argc, char *argv[]) {
         .width = DEFAULT_WIDTH,
         .height = DEFAULT_HEIGHT,
         .num_steps = DEFAULT_STEPS,
-        .seed = -1,
-        .strength = DEFAULT_STRENGTH
+        .seed = -1
     };
 
     int width_set = 0, height_set = 0;
@@ -302,7 +297,6 @@ int main(int argc, char *argv[]) {
             case 's': params.num_steps = atoi(optarg); break;
             case 'S': params.seed = atoll(optarg); break;
             case 'i': input_path = optarg; break;
-            case 't': params.strength = atof(optarg); break;
             case 'e': embeddings_path = optarg; break;
             case 'n': noise_path = optarg; break;
             case 'q': output_level = OUTPUT_QUIET; break;
@@ -352,10 +346,6 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Error: Steps must be between 1 and %d\n", FLUX_MAX_STEPS);
         return 1;
     }
-    if (params.strength < 0.0f || params.strength > 1.0f) {
-        fprintf(stderr, "Error: Strength must be between 0.0 and 1.0\n");
-        return 1;
-    }
 
     /* Set seed */
     int64_t actual_seed;
@@ -377,7 +367,6 @@ int main(int argc, char *argv[]) {
     LOG_VERBOSE("Steps: %d\n", params.num_steps);
     if (input_path) {
         LOG_VERBOSE("Input: %s\n", input_path);
-        LOG_VERBOSE("Strength: %.2f\n", params.strength);
     }
     LOG_VERBOSE("\n");
 

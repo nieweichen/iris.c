@@ -491,31 +491,6 @@ float *flux_init_noise(int batch, int channels, int h, int w, int64_t seed) {
     return noise;
 }
 
-/*
- * Initialize latent for img2img.
- * Blend between encoded image and noise based on strength.
- */
-float *flux_init_img2img(const float *img_latent, float strength,
-                         int batch, int channels, int h, int w, int64_t seed) {
-    int size = batch * channels * h * w;
-    float *latent = (float *)malloc(size * sizeof(float));
-
-    if (seed >= 0) {
-        flux_rng_seed((uint64_t)seed);
-    }
-
-    /* z = (1 - strength) * img_latent + strength * noise */
-    float noise_scale = strength;
-    float img_scale = 1.0f - strength;
-
-    for (int i = 0; i < size; i++) {
-        float noise = flux_random_normal();
-        latent[i] = img_scale * img_latent[i] + noise_scale * noise;
-    }
-
-    return latent;
-}
-
 /* ========================================================================
  * Full Generation Pipeline
  * ======================================================================== */
