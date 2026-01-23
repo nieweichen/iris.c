@@ -760,7 +760,7 @@ flux_image *flux_multiref(flux_ctx *ctx, const char *prompt,
         return NULL;
     }
 
-    /* Encode all reference images */
+    /* Encode all reference images at their native sizes */
     flux_ref_t *ref_latents = (flux_ref_t *)malloc(num_refs * sizeof(flux_ref_t));
     float **ref_data = (float **)malloc(num_refs * sizeof(float *));
     flux_image **resized_imgs = (flux_image **)calloc(num_refs, sizeof(flux_image *));
@@ -769,11 +769,18 @@ flux_image *flux_multiref(flux_ctx *ctx, const char *prompt,
         const flux_image *ref = refs[i];
         const flux_image *img_to_use = ref;
 
-        /* Resize if needed */
-        if (ref->width != p.width || ref->height != p.height) {
-            resized_imgs[i] = flux_image_resize(ref, p.width, p.height);
+        /* Compute native size rounded to multiple of 16 */
+        int ref_w = (ref->width / 16) * 16;
+        int ref_h = (ref->height / 16) * 16;
+
+        /* Clamp to VAE max */
+        if (ref_w > FLUX_VAE_MAX_DIM) ref_w = FLUX_VAE_MAX_DIM;
+        if (ref_h > FLUX_VAE_MAX_DIM) ref_h = FLUX_VAE_MAX_DIM;
+
+        /* Resize only if dimensions changed after rounding/clamping */
+        if (ref->width != ref_w || ref->height != ref_h) {
+            resized_imgs[i] = flux_image_resize(ref, ref_w, ref_h);
             if (!resized_imgs[i]) {
-                /* Cleanup on error */
                 for (int j = 0; j < i; j++) {
                     free(ref_data[j]);
                     if (resized_imgs[j]) flux_image_free(resized_imgs[j]);
@@ -788,11 +795,12 @@ flux_image *flux_multiref(flux_ctx *ctx, const char *prompt,
             img_to_use = resized_imgs[i];
         }
 
-        /* Encode to latent */
+        /* Encode to latent at reference's own size */
         float *tensor = flux_image_to_tensor(img_to_use);
         int lat_h, lat_w;
         ref_data[i] = flux_vae_encode(ctx->vae, tensor, 1,
-                                       p.height, p.width, &lat_h, &lat_w);
+                                       img_to_use->height, img_to_use->width,
+                                       &lat_h, &lat_w);
         free(tensor);
 
         if (!ref_data[i]) {
