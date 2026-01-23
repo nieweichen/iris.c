@@ -39,6 +39,7 @@ That's it. No Python runtime or CUDA toolkit required at inference time.
 - **Runs where Python can't**: Memory-mapped weights (default) enable inference on 8GB RAM systems where the Python ML stack cannot run FLUX.2 at all
 - **Text-to-image**: Generate images from text prompts
 - **Image-to-image**: Transform existing images guided by prompts
+- **Multi-reference**: Combine multiple reference images (e.g., `-i car.png -i beach.png` for "car on beach")
 - **Integrated text encoder**: Qwen3-4B encoder built-in, no external embedding computation needed
 - **Memory efficient**: Automatic encoder release after encoding (~8GB freed)
 - **Memory-mapped weights**: Enabled by default. Reduces peak memory from ~16GB to ~4-5GB. Fastest mode on MPS; BLAS users with plenty of RAM may prefer `--no-mmap` for faster inference
