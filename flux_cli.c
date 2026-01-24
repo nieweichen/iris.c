@@ -29,7 +29,8 @@
 #define CLI_DEFAULT_WIDTH 256
 #define CLI_DEFAULT_HEIGHT 256
 #define CLI_DEFAULT_STEPS 4
-#define CLI_MAX_REFS 100  /* Circular buffer size for $N references */
+#define CLI_REFS_INITIAL 16   /* Initial capacity for $N reference cache */
+#define CLI_MAX_PROMPT_REFS 16  /* Max references in a single prompt */
 
 /* ======================================================================
  * Terminal Detection
@@ -46,8 +47,7 @@ static int has_kitty_graphics(void) {
 
 /* Reference tracking for $N syntax */
 typedef struct {
-    int id;                      /* The $N number */
-    char path[CLI_MAX_PATH];     /* Path to image file */
+    char *path;                  /* Path to image file (dynamically allocated) */
 } cli_ref;
 
 typedef struct {
@@ -62,9 +62,10 @@ typedef struct {
     int image_count;
     int show_enabled;
     int open_enabled;
-    /* Reference tracking */
-    cli_ref refs[CLI_MAX_REFS];  /* Circular buffer of references */
-    int next_ref_id;             /* Next $N to assign */
+    /* Reference tracking (dynamic array, never forgets) */
+    cli_ref *refs;               /* Dynamic array of references */
+    int refs_capacity;           /* Current allocated capacity */
+    int refs_count;              /* Number of references (next_id - 1) */
 } cli_state;
 
 static cli_state state;
@@ -75,22 +76,32 @@ static cli_state state;
 
 /* Register a new image and return its $N id (starts from 1 to match image-0001.png) */
 static int ref_add(const char *path) {
-    int id = ++state.next_ref_id;  /* Pre-increment: 1, 2, 3, ... */
-    int slot = (id - 1) % CLI_MAX_REFS;
-    state.refs[slot].id = id;
-    strncpy(state.refs[slot].path, path, CLI_MAX_PATH - 1);
-    state.refs[slot].path[CLI_MAX_PATH - 1] = '\0';
+    /* Grow array if needed */
+    if (state.refs_count >= state.refs_capacity) {
+        int new_cap = state.refs_capacity ? state.refs_capacity * 2 : CLI_REFS_INITIAL;
+        cli_ref *new_refs = realloc(state.refs, new_cap * sizeof(cli_ref));
+        if (!new_refs) {
+            fprintf(stderr, "Error: Out of memory for references\n");
+            return -1;
+        }
+        state.refs = new_refs;
+        state.refs_capacity = new_cap;
+    }
+
+    int id = state.refs_count + 1;  /* IDs are 1-based */
+    state.refs[state.refs_count].path = strdup(path);
+    if (!state.refs[state.refs_count].path) {
+        fprintf(stderr, "Error: Out of memory for path\n");
+        return -1;
+    }
+    state.refs_count++;
     return id;
 }
 
 /* Lookup a reference by $N id. Returns path or NULL if not found. */
 static const char *ref_lookup(int id) {
-    if (id < 1 || id > state.next_ref_id) return NULL;
-    /* Check if id is still in the circular buffer */
-    if (state.next_ref_id - id >= CLI_MAX_REFS) return NULL;
-    int slot = (id - 1) % CLI_MAX_REFS;
-    if (state.refs[slot].id != id) return NULL;
-    return state.refs[slot].path;
+    if (id < 1 || id > state.refs_count) return NULL;
+    return state.refs[id - 1].path;  /* Direct access, IDs are 1-based */
 }
 
 /* ======================================================================
@@ -658,10 +669,10 @@ static int process_prompt(char *line) {
     char *prompt_to_free = NULL;
 
     /* Parse $N references at the beginning */
-    const char *ref_paths[CLI_MAX_REFS];
+    const char *ref_paths[CLI_MAX_PROMPT_REFS];
     int num_refs = 0;
 
-    while (*line == '$') {
+    while (*line == '$' && num_refs < CLI_MAX_PROMPT_REFS) {
         line++;  /* skip $ */
         /* $N requires digit immediately after $ (no spaces) */
         if (isdigit((unsigned char)*line)) {
@@ -685,7 +696,6 @@ static int process_prompt(char *line) {
             ref_paths[num_refs++] = state.last_image;
         }
         line = skip_spaces(line);
-        if (num_refs >= CLI_MAX_REFS) break;
     }
 
     /* Check for inline size (beginning or end of prompt) */
