@@ -4190,6 +4190,9 @@ static sdpa_graph_cache_t *get_sdpa_graph_cache(int seq_q, int seq_k, int num_he
             return NULL;
         }
 
+        /* Native SDPA expects [batch, heads, seq, head_dim] layout.
+         * Our input is [seq, heads * head_dim], reshape to [1, seq, heads, head_dim]
+         * then transpose to [1, heads, seq, head_dim]. */
         NSArray<NSNumber *> *qShape = @[@1, @(seq_q), @(num_heads), @(head_dim)];
         NSArray<NSNumber *> *kShape = @[@1, @(seq_k), @(num_heads), @(head_dim)];
         NSArray<NSNumber *> *vShape = @[@1, @(seq_k), @(num_heads), @(head_dim)];
@@ -4199,10 +4202,22 @@ static sdpa_graph_cache_t *get_sdpa_graph_cache(int seq_q, int seq_k, int num_he
         MPSGraphTensor *kIn = [graph placeholderWithShape:kShape dataType:MPSDataTypeBFloat16 name:nil];
         MPSGraphTensor *vIn = [graph placeholderWithShape:vShape dataType:MPSDataTypeBFloat16 name:nil];
 
-        /* Transpose to [1, heads, seq, head_dim] for matmul */
+        /* Transpose to [1, heads, seq, head_dim] for SDPA */
         MPSGraphTensor *qT = [graph transposeTensor:qIn dimension:1 withDimension:2 name:nil];
         MPSGraphTensor *kT = [graph transposeTensor:kIn dimension:1 withDimension:2 name:nil];
         MPSGraphTensor *vT = [graph transposeTensor:vIn dimension:1 withDimension:2 name:nil];
+
+        MPSGraphTensor *outTensor = nil;
+
+        /* Build attention graph: scaled dot product attention with f32 softmax.
+         *
+         * NOTE: The native scaledDotProductAttention API (macOS 14+) was tested but
+         * showed numerical differences in the output. Until this is resolved, we use
+         * manual attention which passes all regression tests.
+         *
+         * Manual attention: Q @ K^T * scale -> softmax -> @ V
+         * Uses f32 for softmax to maintain precision.
+         */
         MPSGraphTensor *kTT = [graph transposeTensor:kT dimension:2 withDimension:3 name:nil];
 
         MPSGraphTensor *qk = [graph matrixMultiplicationWithPrimaryTensor:qT secondaryTensor:kTT name:nil];
@@ -4214,13 +4229,13 @@ static sdpa_graph_cache_t *get_sdpa_graph_cache(int seq_q, int seq_k, int num_he
         MPSGraphTensor *sm = [graph softMaxWithTensor:scaled axis:3 name:nil];
         MPSGraphTensor *out = [graph matrixMultiplicationWithPrimaryTensor:sm secondaryTensor:vT name:nil];
         MPSGraphTensor *outCast = [graph castTensor:out toType:MPSDataTypeBFloat16 name:nil];
-        MPSGraphTensor *outTrans = [graph transposeTensor:outCast dimension:1 withDimension:2 name:nil];
+        outTensor = [graph transposeTensor:outCast dimension:1 withDimension:2 name:nil];
 
         entry->graph = graph;
         entry->qTensor = qIn;
         entry->kTensor = kIn;
         entry->vTensor = vIn;
-        entry->outTensor = outTrans;
+        entry->outTensor = outTensor;
         entry->qShape = qShape;
         entry->kShape = kShape;
         entry->vShape = vShape;
@@ -4293,6 +4308,10 @@ static int flux_gpu_attention_mpsgraph_bf16(flux_gpu_tensor_t out,
     if (!g_initialized || !g_device) return 0;
     if (!out || !Q || !K || !V) return 0;
     if (!out->is_f16 || !Q->is_f16 || !K->is_f16 || !V->is_f16) return 0;
+
+    if (bf16_debug_enabled()) {
+        fprintf(stderr, "[ATTN] Using MPSGraph attention seq_q=%d seq_k=%d\n", seq_q, seq_k);
+    }
 
     sdpa_graph_cache_t *cache = get_sdpa_graph_cache(seq_q, seq_k, num_heads, head_dim, scale);
     if (!cache || !cache->graph) return 0;
@@ -4369,6 +4388,16 @@ static int flux_gpu_attention_mpsgraph_bf16(flux_gpu_tensor_t out,
  * Output: [seq, heads*head_dim] (bf16)
  * This keeps computation in threadgroup memory without materializing scores.
  */
+/* MPSGraph attention is faster than our custom Metal kernel (~20% improvement).
+ * Set FLUX_USE_CUSTOM_ATTN=1 to force using the custom kernel for comparison. */
+static int prefer_custom_attn(void) {
+    static int pref = -1;
+    if (pref < 0) {
+        pref = getenv("FLUX_USE_CUSTOM_ATTN") ? 1 : 0;
+    }
+    return pref;
+}
+
 int flux_gpu_attention_fused_bf16(flux_gpu_tensor_t out,
                                    flux_gpu_tensor_t Q, flux_gpu_tensor_t K, flux_gpu_tensor_t V,
                                    int seq_q, int seq_k, int num_heads, int head_dim, float scale) {
@@ -4376,13 +4405,21 @@ int flux_gpu_attention_fused_bf16(flux_gpu_tensor_t out,
     if (!out || !Q || !K || !V) return 0;
     if (!out->is_f16 || !Q->is_f16 || !K->is_f16 || !V->is_f16) return 0;
 
+    /* Try MPSGraph attention first (faster than custom kernel).
+     * Fall back to custom kernel only if MPSGraph fails or is disabled. */
+    if (!prefer_custom_attn() && NSClassFromString(@"MPSGraph")) {
+        if (flux_gpu_attention_mpsgraph_bf16(out, Q, K, V, seq_q, seq_k, num_heads, head_dim, scale)) {
+            return 1;
+        }
+    }
+
     if (seq_k <= 1024 && g_attention_fused_bf16_pipeline) {
         @autoreleasepool {
             id<MTLCommandBuffer> cmdBuffer = get_tensor_cmd();
             id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
 
             if (bf16_debug_enabled()) {
-                fprintf(stderr, "[BF16] attention_fused_bf16 seq_q=%d seq_k=%d heads=%d head_dim=%d\n",
+                fprintf(stderr, "[ATTN] Using custom kernel seq_q=%d seq_k=%d heads=%d head_dim=%d\n",
                         seq_q, seq_k, num_heads, head_dim);
             }
 
