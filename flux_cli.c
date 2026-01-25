@@ -17,6 +17,8 @@
 #include <errno.h>
 
 #include "flux.h"
+#include "flux_qwen3.h"  /* For QWEN3_MAX_SEQ_LEN, QWEN3_TEXT_DIM */
+#include "embcache.h"
 #include "linenoise.h"
 #include "terminals.h"
 
@@ -287,7 +289,33 @@ static int generate_image(const char *prompt, const char *ref_image,
             params.height = state.height;
         }
         printf("Generating %dx%d...\n", params.width, params.height);
-        img = flux_generate(state.ctx, prompt, &params);
+
+        /* Try to use cached embedding */
+        float *embeddings = emb_cache_lookup(prompt);
+        if (embeddings) {
+            printf("(using cached embedding)\n");
+            img = flux_generate_with_embeddings(state.ctx, embeddings,
+                                                 QWEN3_MAX_SEQ_LEN, &params);
+            free(embeddings);
+        } else {
+            /* Encode and cache for next time */
+            int seq_len;
+            embeddings = flux_encode_text(state.ctx, prompt, &seq_len);
+            if (embeddings) {
+                /* Cache the embedding (4-bit quantized) */
+                emb_cache_store(prompt, embeddings,
+                                seq_len * QWEN3_TEXT_DIM);
+
+                /* Release text encoder to free memory before generation */
+                flux_release_text_encoder(state.ctx);
+
+                img = flux_generate_with_embeddings(state.ctx, embeddings,
+                                                     seq_len, &params);
+                free(embeddings);
+            } else {
+                img = NULL;
+            }
+        }
     }
 
     /* End timing */
@@ -595,12 +623,23 @@ static void cmd_explore(char *arg) {
     printf("Generating %d images at %dx%d...\n",
            count, state.width, state.height);
 
-    /* Encode text once */
-    int seq_len;
-    float *embeddings = flux_encode_text(state.ctx, prompt, &seq_len);
-    if (!embeddings) {
-        fprintf(stderr, "Error: Failed to encode prompt.\n");
-        return;
+    /* Try cached embedding first */
+    int seq_len = QWEN3_MAX_SEQ_LEN;
+    float *embeddings = emb_cache_lookup(prompt);
+
+    if (embeddings) {
+        printf("(using cached embedding)\n");
+    } else {
+        /* Encode and cache */
+        embeddings = flux_encode_text(state.ctx, prompt, &seq_len);
+        if (!embeddings) {
+            fprintf(stderr, "Error: Failed to encode prompt.\n");
+            free(prompt_to_free);
+            return;
+        }
+        /* Cache for future use */
+        emb_cache_store(prompt, embeddings, seq_len * QWEN3_TEXT_DIM);
+        flux_release_text_encoder(state.ctx);
     }
 
     flux_params params = FLUX_PARAMS_DEFAULT;
@@ -788,6 +827,9 @@ int flux_cli_run(flux_ctx *ctx, const char *model_dir) {
     state.steps = CLI_DEFAULT_STEPS;
     state.seed = -1;
 
+    /* Initialize embedding cache */
+    emb_cache_init();
+
     /* Detect terminal graphics support */
     cli_term_proto = detect_terminal_graphics();
     state.show_enabled = (cli_term_proto != TERM_PROTO_NONE);
@@ -834,6 +876,9 @@ int flux_cli_run(flux_ctx *ctx, const char *model_dir) {
     if (home) {
         linenoiseHistorySave(history_path);
     }
+
+    /* Cleanup embedding cache */
+    emb_cache_free();
 
     printf("Goodbye.\n");
     return 0;
