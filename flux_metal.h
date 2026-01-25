@@ -379,6 +379,17 @@ void flux_gpu_qk_rms_norm_bf16(flux_gpu_tensor_t q, flux_gpu_tensor_t k,
                                 flux_gpu_tensor_t q_weight_bf16, flux_gpu_tensor_t k_weight_bf16,
                                 int seq, int heads, int head_dim, float eps);
 
+/* BF16 per-head RMSNorm (single tensor, for GQA with different Q/K head counts) */
+int flux_gpu_head_rms_norm_bf16(flux_gpu_tensor_t x, flux_gpu_tensor_t weight_bf16,
+                                 int seq, int heads, int head_dim, float eps);
+
+/* BF16 RMS Norm: out = rms_norm(x) * weight */
+void flux_gpu_rms_norm_bf16(flux_gpu_tensor_t out, flux_gpu_tensor_t x,
+                             flux_gpu_tensor_t weight, int seq, int hidden, float eps);
+
+/* BF16 element-wise add: out = a + b */
+void flux_gpu_add_bf16(flux_gpu_tensor_t out, flux_gpu_tensor_t a, flux_gpu_tensor_t b, int n);
+
 /* BF16 SiLU multiply: gate = silu(gate) * up */
 void flux_gpu_silu_mul_bf16(flux_gpu_tensor_t gate, flux_gpu_tensor_t up, int n);
 
@@ -396,6 +407,29 @@ void flux_gpu_rope_unified_bf16(flux_gpu_tensor_t q, flux_gpu_tensor_t k,
 void flux_gpu_rope_2d_bf16(flux_gpu_tensor_t x,
                             const float *cos_freq, const float *sin_freq,
                             int seq, int heads, int head_dim, int axis_dim);
+
+/* BF16 Causal Attention with GQA support (for text encoder)
+ * Q: [seq, num_q_heads * head_dim] (bf16)
+ * K, V: [seq, num_kv_heads * head_dim] (bf16)
+ * out: [seq, num_q_heads * head_dim] (bf16)
+ * attention_mask: [seq] - 1 for valid, 0 for padding (can be NULL)
+ * Supports GQA where num_q_heads > num_kv_heads.
+ * Returns 1 on success, 0 on failure.
+ */
+int flux_gpu_causal_attention_bf16(flux_gpu_tensor_t out,
+                                    flux_gpu_tensor_t Q, flux_gpu_tensor_t K, flux_gpu_tensor_t V,
+                                    const int *attention_mask,
+                                    int seq, int num_q_heads, int num_kv_heads,
+                                    int head_dim, float scale);
+
+/* BF16 RoPE for text encoder (Qwen3 style)
+ * Q: [seq, num_q_heads * head_dim] (bf16) - modified in-place
+ * K: [seq, num_kv_heads * head_dim] (bf16) - modified in-place
+ * cos_cache, sin_cache: [seq, head_dim/2] (f32) - precomputed
+ */
+void flux_gpu_rope_text_bf16(flux_gpu_tensor_t q, flux_gpu_tensor_t k,
+                              const float *cos_cache, const float *sin_cache,
+                              int seq, int num_q_heads, int num_kv_heads, int head_dim);
 
 /* Concatenate two bf16 sequences along seq dimension */
 void flux_gpu_concat_seq_bf16(flux_gpu_tensor_t out,

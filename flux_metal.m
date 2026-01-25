@@ -189,6 +189,7 @@ static id<MTLComputePipelineState> g_qk_rms_norm_bf16_pipeline;
 static id<MTLComputePipelineState> g_adaln_norm_bf16_pipeline;
 static id<MTLComputePipelineState> g_silu_bf16_pipeline;
 static id<MTLComputePipelineState> g_silu_mul_bf16_pipeline;
+static id<MTLComputePipelineState> g_add_bf16_pipeline;
 static id<MTLComputePipelineState> g_gated_add_bf16_pipeline;
 static id<MTLComputePipelineState> g_rope_unified_bf16_pipeline;
 static id<MTLComputePipelineState> g_rope_2d_bf16_pipeline;
@@ -2931,6 +2932,9 @@ static id<MTLComputePipelineState> g_softmax_pipeline = nil;
 static id<MTLComputePipelineState> g_rope_2d_pipeline = nil;
 static id<MTLComputePipelineState> g_rope_unified_pipeline = nil;
 static id<MTLComputePipelineState> g_causal_attention_pipeline = nil;
+static id<MTLComputePipelineState> g_causal_attention_bf16_pipeline = nil;
+static id<MTLComputePipelineState> g_rope_bf16_pipeline = nil;
+static id<MTLComputePipelineState> g_head_rms_norm_bf16_pipeline = nil;
 static id<MTLComputePipelineState> g_attention_fused_pipeline = nil;
 static id<MTLComputePipelineState> g_gated_add_pipeline = nil;
 static id<MTLComputePipelineState> g_split_qkv_mlp_pipeline = nil;
@@ -3062,6 +3066,33 @@ int flux_metal_init_shaders(void) {
             }
         }
 
+        func = [g_shader_library newFunctionWithName:@"causal_attention_fused_bf16"];
+        if (func) {
+            g_causal_attention_bf16_pipeline = [g_device newComputePipelineStateWithFunction:func error:&error];
+            if (!g_causal_attention_bf16_pipeline) {
+                fprintf(stderr, "Metal shaders: causal_attention_fused_bf16 pipeline failed: %s\n",
+                        [[error localizedDescription] UTF8String]);
+            }
+        }
+
+        func = [g_shader_library newFunctionWithName:@"rope_bf16"];
+        if (func) {
+            g_rope_bf16_pipeline = [g_device newComputePipelineStateWithFunction:func error:&error];
+            if (!g_rope_bf16_pipeline) {
+                fprintf(stderr, "Metal shaders: rope_bf16 pipeline failed: %s\n",
+                        [[error localizedDescription] UTF8String]);
+            }
+        }
+
+        func = [g_shader_library newFunctionWithName:@"head_rms_norm_bf16"];
+        if (func) {
+            g_head_rms_norm_bf16_pipeline = [g_device newComputePipelineStateWithFunction:func error:&error];
+            if (!g_head_rms_norm_bf16_pipeline) {
+                fprintf(stderr, "Metal shaders: head_rms_norm_bf16 pipeline failed: %s\n",
+                        [[error localizedDescription] UTF8String]);
+            }
+        }
+
         func = [g_shader_library newFunctionWithName:@"attention_fused"];
         if (func) {
             g_attention_fused_pipeline = [g_device newComputePipelineStateWithFunction:func error:&error];
@@ -3149,6 +3180,11 @@ int flux_metal_init_shaders(void) {
         func = [g_shader_library newFunctionWithName:@"silu_mul_bf16"];
         if (func) {
             g_silu_mul_bf16_pipeline = [g_device newComputePipelineStateWithFunction:func error:&error];
+        }
+
+        func = [g_shader_library newFunctionWithName:@"add_bf16"];
+        if (func) {
+            g_add_bf16_pipeline = [g_device newComputePipelineStateWithFunction:func error:&error];
         }
 
         func = [g_shader_library newFunctionWithName:@"gated_add_bf16"];
@@ -4550,6 +4586,111 @@ void flux_gpu_qk_rms_norm_bf16(flux_gpu_tensor_t q, flux_gpu_tensor_t k,
     }
 }
 
+/* BF16 per-head RMS Norm (single tensor version for GQA support)
+ * x: [seq, heads * head_dim] (bf16, modified in-place)
+ * weight: [head_dim] (bf16)
+ * Returns 1 on success, 0 on failure
+ */
+int flux_gpu_head_rms_norm_bf16(flux_gpu_tensor_t x, flux_gpu_tensor_t weight_bf16,
+                                 int seq, int heads, int head_dim, float eps) {
+    if (!g_shaders_initialized || !g_head_rms_norm_bf16_pipeline) return 0;
+    if (!x || !weight_bf16) return 0;
+    if (!x->is_f16 || !weight_bf16->is_f16) return 0;
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmdBuffer = get_tensor_cmd();
+        id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:g_head_rms_norm_bf16_pipeline];
+        [encoder setBuffer:x->buffer offset:0 atIndex:0];
+        [encoder setBuffer:weight_bf16->buffer offset:0 atIndex:1];
+        [encoder setBytes:&heads length:sizeof(int) atIndex:2];
+        [encoder setBytes:&head_dim length:sizeof(int) atIndex:3];
+        [encoder setBytes:&eps length:sizeof(float) atIndex:4];
+
+        [encoder dispatchThreadgroups:MTLSizeMake(seq, heads, 1)
+                threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [encoder endEncoding];
+
+        x->has_pending_work = 1;
+        if (!g_tensor_batch_mode) {
+            [cmdBuffer commit];
+            [cmdBuffer waitUntilCompleted];
+            x->has_pending_work = 0;
+        }
+    }
+    return 1;
+}
+
+/* BF16 RMS Norm on tensors: out = rms_norm(x) * weight */
+void flux_gpu_rms_norm_bf16(flux_gpu_tensor_t out, flux_gpu_tensor_t x,
+                             flux_gpu_tensor_t weight, int seq, int hidden, float eps) {
+    if (!g_shaders_initialized || !g_rms_norm_bf16_pipeline) return;
+    if (!out || !x || !weight) return;
+    if (!out->is_f16 || !x->is_f16 || !weight->is_f16) return;
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmdBuffer = get_tensor_cmd();
+        id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:g_rms_norm_bf16_pipeline];
+        [encoder setBuffer:x->buffer offset:0 atIndex:0];
+        [encoder setBuffer:weight->buffer offset:0 atIndex:1];
+        [encoder setBuffer:out->buffer offset:0 atIndex:2];
+        [encoder setBytes:&hidden length:sizeof(int) atIndex:3];
+        [encoder setBytes:&eps length:sizeof(float) atIndex:4];
+
+        NSUInteger threadsPerGroup = MIN(256, (NSUInteger)hidden);
+        [encoder dispatchThreadgroups:MTLSizeMake(seq, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(threadsPerGroup, 1, 1)];
+        [encoder endEncoding];
+
+        out->has_pending_work = 1;
+        x->has_pending_work = 1;
+        if (!g_tensor_batch_mode) {
+            [cmdBuffer commit];
+            [cmdBuffer waitUntilCompleted];
+            out->has_pending_work = 0;
+            x->has_pending_work = 0;
+        }
+    }
+}
+
+/* BF16 element-wise add: out = a + b (can be in-place: out = a) */
+void flux_gpu_add_bf16(flux_gpu_tensor_t out, flux_gpu_tensor_t a, flux_gpu_tensor_t b, int n) {
+    if (!g_shaders_initialized || !g_add_bf16_pipeline) return;
+    if (!out || !a || !b) return;
+    if (!out->is_f16 || !a->is_f16 || !b->is_f16) return;
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmdBuffer = get_tensor_cmd();
+        id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:g_add_bf16_pipeline];
+        [encoder setBuffer:a->buffer offset:0 atIndex:0];
+        [encoder setBuffer:b->buffer offset:0 atIndex:1];
+        [encoder setBuffer:out->buffer offset:0 atIndex:2];
+        [encoder setBytes:&n length:sizeof(int) atIndex:3];
+
+        NSUInteger threads = 256;
+        NSUInteger groups = (n + threads - 1) / threads;
+        [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+        [encoder endEncoding];
+
+        out->has_pending_work = 1;
+        a->has_pending_work = 1;
+        b->has_pending_work = 1;
+        if (!g_tensor_batch_mode) {
+            [cmdBuffer commit];
+            [cmdBuffer waitUntilCompleted];
+            out->has_pending_work = 0;
+            a->has_pending_work = 0;
+            b->has_pending_work = 0;
+        }
+    }
+}
+
 /* BF16 SiLU multiply: gate = silu(gate) * up */
 void flux_gpu_silu_mul_bf16(flux_gpu_tensor_t gate, flux_gpu_tensor_t up, int n) {
     if (!g_shaders_initialized || !g_silu_mul_bf16_pipeline) return;
@@ -4719,6 +4860,129 @@ void flux_gpu_rope_2d_bf16(flux_gpu_tensor_t x,
             x->has_pending_work = 0;
         }
 
+    }
+}
+
+/* BF16 Causal Attention with GQA support (for text encoder) */
+int flux_gpu_causal_attention_bf16(flux_gpu_tensor_t out,
+                                    flux_gpu_tensor_t Q, flux_gpu_tensor_t K, flux_gpu_tensor_t V,
+                                    const int *attention_mask,
+                                    int seq, int num_q_heads, int num_kv_heads,
+                                    int head_dim, float scale) {
+    if (!g_shaders_initialized || !g_causal_attention_bf16_pipeline) {
+        return 0;
+    }
+    if (!out || !Q || !K || !V) return 0;
+    if (!out->is_f16 || !Q->is_f16 || !K->is_f16 || !V->is_f16) return 0;
+
+    /* Limit seq length to what the shader can handle (512 for shared memory) */
+    if (seq > 512) {
+        return 0;
+    }
+
+    @autoreleasepool {
+        /* Create mask buffer if needed */
+        id<MTLBuffer> bufMask = nil;
+        if (attention_mask) {
+            size_t mask_size = (size_t)seq * sizeof(int);
+            bufMask = pool_get_buffer(mask_size);
+            if (bufMask) {
+                memcpy([bufMask contents], attention_mask, mask_size);
+            }
+        }
+
+        int use_mask = (attention_mask != NULL) ? 1 : 0;
+
+        id<MTLCommandBuffer> cmdBuffer = get_tensor_cmd();
+        id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:g_causal_attention_bf16_pipeline];
+        [encoder setBuffer:Q->buffer offset:0 atIndex:0];
+        [encoder setBuffer:K->buffer offset:0 atIndex:1];
+        [encoder setBuffer:V->buffer offset:0 atIndex:2];
+        [encoder setBuffer:out->buffer offset:0 atIndex:3];
+        if (bufMask) {
+            [encoder setBuffer:bufMask offset:0 atIndex:4];
+        } else {
+            [encoder setBuffer:Q->buffer offset:0 atIndex:4];  /* Dummy for null mask */
+        }
+        [encoder setBytes:&seq length:sizeof(int) atIndex:5];
+        [encoder setBytes:&num_q_heads length:sizeof(int) atIndex:6];
+        [encoder setBytes:&num_kv_heads length:sizeof(int) atIndex:7];
+        [encoder setBytes:&head_dim length:sizeof(int) atIndex:8];
+        [encoder setBytes:&scale length:sizeof(float) atIndex:9];
+        [encoder setBytes:&use_mask length:sizeof(int) atIndex:10];
+
+        NSUInteger threadsPerGroup = MIN(256, (NSUInteger)seq);
+        [encoder dispatchThreadgroups:MTLSizeMake(seq, num_q_heads, 1)
+                threadsPerThreadgroup:MTLSizeMake(threadsPerGroup, 1, 1)];
+        [encoder endEncoding];
+
+        out->has_pending_work = 1;
+        Q->has_pending_work = 1;
+        K->has_pending_work = 1;
+        V->has_pending_work = 1;
+
+        if (!g_tensor_batch_mode) {
+            [cmdBuffer commit];
+            [cmdBuffer waitUntilCompleted];
+            out->has_pending_work = 0;
+            Q->has_pending_work = 0;
+            K->has_pending_work = 0;
+            V->has_pending_work = 0;
+        }
+
+        if (bufMask) {
+            pool_release_buffer(bufMask);
+        }
+    }
+
+    return 1;
+}
+
+/* BF16 RoPE for text encoder (Qwen3 style) */
+void flux_gpu_rope_text_bf16(flux_gpu_tensor_t q, flux_gpu_tensor_t k,
+                              const float *cos_cache, const float *sin_cache,
+                              int seq, int num_q_heads, int num_kv_heads, int head_dim) {
+    if (!g_shaders_initialized || !g_rope_bf16_pipeline) return;
+    if (!q || !k || !q->is_f16 || !k->is_f16) return;
+
+    @autoreleasepool {
+        int half_dim = head_dim / 2;
+        size_t freq_size = (size_t)seq * half_dim * sizeof(float);
+
+        id<MTLBuffer> bufCos = get_rope_buffer(cos_cache, freq_size);
+        id<MTLBuffer> bufSin = get_rope_buffer(sin_cache, freq_size);
+        if (!bufCos || !bufSin) return;
+
+        id<MTLCommandBuffer> cmdBuffer = get_tensor_cmd();
+        id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:g_rope_bf16_pipeline];
+        [encoder setBuffer:q->buffer offset:0 atIndex:0];
+        [encoder setBuffer:k->buffer offset:0 atIndex:1];
+        [encoder setBuffer:bufCos offset:0 atIndex:2];
+        [encoder setBuffer:bufSin offset:0 atIndex:3];
+        [encoder setBytes:&seq length:sizeof(int) atIndex:4];
+        [encoder setBytes:&num_q_heads length:sizeof(int) atIndex:5];
+        [encoder setBytes:&num_kv_heads length:sizeof(int) atIndex:6];
+        [encoder setBytes:&head_dim length:sizeof(int) atIndex:7];
+
+        /* Dispatch: one thread per (pos, head) - max of q_heads and kv_heads */
+        int max_heads = num_q_heads > num_kv_heads ? num_q_heads : num_kv_heads;
+        [encoder dispatchThreadgroups:MTLSizeMake(seq, max_heads, 1)
+                threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [encoder endEncoding];
+
+        q->has_pending_work = 1;
+        k->has_pending_work = 1;
+
+        if (!g_tensor_batch_mode) {
+            [cmdBuffer commit];
+            [cmdBuffer waitUntilCompleted];
+            q->has_pending_work = 0;
+            k->has_pending_work = 0;
+        }
     }
 }
 
