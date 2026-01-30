@@ -527,7 +527,7 @@ flux_image *flux_img2img(flux_ctx *ctx, const char *prompt, const flux_image *in
 
 **Image handling:**
 ```c
-flux_image *flux_image_load(const char *path);     /* Load PNG or PPM */
+flux_image *flux_image_load(const char *path);     /* Load PNG, JPEG, or PPM */
 int flux_image_save(const flux_image *img, const char *path);  /* 0=success, -1=error */
 int flux_image_save_with_seed(const flux_image *img, const char *path, int64_t seed);  /* Save with metadata */
 flux_image *flux_image_resize(const flux_image *img, int new_w, int new_h);
