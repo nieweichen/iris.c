@@ -231,13 +231,19 @@ int kitty_display_image(const flux_image *img) {
  * See: https://iterm2.com/documentation-images.html
  * ====================================================================== */
 
-static int iterm2_send_png(const unsigned char *png_data, size_t png_size) {
+static int iterm2_send_png(const unsigned char *png_data, size_t png_size,
+                           int width, int height) {
     size_t b64_len;
     char *b64_data = base64_encode(png_data, png_size, &b64_len);
     if (!b64_data) return -1;
 
-    /* iTerm2 protocol: OSC 1337 ; File=inline=1 : <base64> BEL */
-    printf("\033]1337;File=inline=1:");
+    /* iTerm2 protocol: OSC 1337 ; File=inline=1;width=Npx;height=Npx : <base64> BEL
+     * Apply zoom factor for HiDPI/Retina display. */
+    int display_w = width * terminal_zoom;
+    int display_h = height * terminal_zoom;
+
+    printf("\033]1337;File=inline=1;width=%dpx;height=%dpx:",
+           display_w, display_h);
     fwrite(b64_data, 1, b64_len, stdout);
     printf("\a\n");
     fflush(stdout);
@@ -275,7 +281,11 @@ int iterm2_display_png(const char *path) {
     }
     fclose(f);
 
-    int result = iterm2_send_png(png_data, size);
+    /* Get PNG dimensions for correct HiDPI display */
+    int width = 0, height = 0;
+    png_get_dimensions(png_data, size, &width, &height);
+
+    int result = iterm2_send_png(png_data, size, width, height);
     free(png_data);
     return result;
 }
@@ -303,7 +313,7 @@ int iterm2_display_image(const flux_image *img) {
         return -1;
     }
 
-    /* Display the PNG */
+    /* Display the PNG (extracts dimensions and applies zoom) */
     int result = iterm2_display_png(tmppath);
 
     /* Clean up */
