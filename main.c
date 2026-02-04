@@ -213,7 +213,8 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  -H, --height N        Output height (default: %d)\n", DEFAULT_HEIGHT);
     fprintf(stderr, "  -s, --steps N         Sampling steps (default: auto, 4 distilled / 50 base)\n");
     fprintf(stderr, "  -g, --guidance N      CFG guidance scale (default: auto, 1.0 distilled / 4.0 base)\n");
-    fprintf(stderr, "  -S, --seed N          Random seed (-1 for random)\n\n");
+    fprintf(stderr, "  -S, --seed N          Random seed (-1 for random)\n");
+    fprintf(stderr, "      --linear          Use linear timestep schedule (default: shifted sigmoid)\n\n");
     fprintf(stderr, "Model options:\n");
     fprintf(stderr, "      --base            Force base model mode (undistilled, CFG enabled)\n\n");
     fprintf(stderr, "Reference images (img2img / multi-reference):\n");
@@ -272,6 +273,7 @@ int main(int argc, char *argv[]) {
         {"show-steps", no_argument,       0, 'K'},
         {"zoom",       required_argument, 0, 'z'},
         {"base",       no_argument,       0, 'B'},
+        {"linear",     no_argument,       0, 'L'},
         {"debug-py",   no_argument,       0, 'D'},
         {0, 0, 0, 0}
     };
@@ -334,6 +336,7 @@ int main(int argc, char *argv[]) {
             case 'K': show_steps = 1; break;
             case 'z': terminal_set_zoom(atoi(optarg)); break;
             case 'B': force_base = 1; break;
+            case 'L': params.linear_schedule = 1; break;
             case 'D': debug_py = 1; break;
             default:
                 print_usage(argv[0]);

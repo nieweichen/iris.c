@@ -87,12 +87,13 @@ typedef struct {
     int num_steps;          /* Inference steps (default: 4 distilled, 50 base) */
     int64_t seed;           /* Random seed (-1 for random) */
     float guidance;         /* CFG guidance scale (0 = auto from model type) */
+    int linear_schedule;    /* Use linear timestep schedule instead of shifted sigmoid */
 } flux_params;
 
 /* Default parameters */
 #define FLUX_DEFAULT_WIDTH  256
 #define FLUX_DEFAULT_HEIGHT 256
-#define FLUX_PARAMS_DEFAULT { FLUX_DEFAULT_WIDTH, FLUX_DEFAULT_HEIGHT, 0, -1, 0.0f }
+#define FLUX_PARAMS_DEFAULT { FLUX_DEFAULT_WIDTH, FLUX_DEFAULT_HEIGHT, 0, -1, 0.0f, 0 }
 
 /* ========================================================================
  * Core API

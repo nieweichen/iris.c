@@ -58,6 +58,7 @@ typedef struct {
     int steps;
     float guidance;
     int64_t seed;
+    int linear_schedule;
     int image_count;
     int show_enabled;
     int open_enabled;
@@ -314,6 +315,7 @@ static int generate_image(const char *prompt, const char *ref_image,
     flux_params params = FLUX_PARAMS_DEFAULT;
     params.num_steps = state.steps;
     params.guidance = state.guidance;
+    params.linear_schedule = state.linear_schedule;
 
     /* Determine seed */
     int64_t actual_seed;
@@ -425,6 +427,7 @@ static int generate_multiref(const char *prompt, const char **ref_paths, int num
     flux_params params = FLUX_PARAMS_DEFAULT;
     params.num_steps = state.steps;
     params.guidance = state.guidance;
+    params.linear_schedule = state.linear_schedule;
 
     /* Determine seed */
     int64_t actual_seed;
@@ -517,6 +520,7 @@ static void cmd_help(void) {
     printf("  !size <W>x<H>         Set default size\n");
     printf("  !steps <n>            Set sampling steps (0 = auto)\n");
     printf("  !guidance <n>         Set CFG guidance scale (0 = auto)\n");
+    printf("  !linear               Toggle linear timestep schedule\n");
     printf("  !explore <n> <prompt> Generate n thumbnail variations\n");
     printf("  !show                 Toggle terminal display\n");
     printf("  !zoom <n>             Set display zoom (default: 2 for Retina)\n");
@@ -738,6 +742,7 @@ static void cmd_explore(char *arg) {
     params.height = state.height;
     params.num_steps = state.steps;
     params.guidance = state.guidance;
+    params.linear_schedule = state.linear_schedule;
 
     if (!flux_is_distilled(state.ctx)) {
         /* Base model: use flux_generate() for CFG support */
@@ -848,6 +853,9 @@ static int process_command(char *line) {
         cmd_steps(cmd + 5);
     } else if (starts_with_ci(cmd, "guidance")) {
         cmd_guidance(cmd + 8);
+    } else if (starts_with_ci(cmd, "linear")) {
+        state.linear_schedule = !state.linear_schedule;
+        printf("Schedule: %s\n", state.linear_schedule ? "linear" : "shifted sigmoid");
     } else if (starts_with_ci(cmd, "explore")) {
         cmd_explore(cmd + 7);
     } else if (starts_with_ci(cmd, "show")) {

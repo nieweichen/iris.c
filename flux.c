@@ -108,6 +108,13 @@ extern float *flux_linear_schedule(int num_steps);
 extern float *flux_official_schedule(int num_steps, int image_seq_len);
 extern float *flux_init_noise(int batch, int channels, int h, int w, int64_t seed);
 
+/* Return schedule based on params: linear if requested, otherwise official shifted sigmoid. */
+static float *flux_selected_schedule(const flux_params *p, int image_seq_len) {
+    if (p->linear_schedule)
+        return flux_linear_schedule(p->num_steps);
+    return flux_official_schedule(p->num_steps, image_seq_len);
+}
+
 /* ========================================================================
  * Text Encoder (Qwen3)
  * ======================================================================== */
@@ -428,8 +435,8 @@ flux_image *flux_generate(flux_ctx *ctx, const char *prompt,
     int64_t seed = (p.seed < 0) ? (int64_t)time(NULL) : p.seed;
     float *z = flux_init_noise(1, FLUX_LATENT_CHANNELS, latent_h, latent_w, seed);
 
-    /* Get official FLUX.2 schedule (matches Python) */
-    float *schedule = flux_official_schedule(p.num_steps, image_seq_len);
+    /* Get schedule */
+    float *schedule = flux_selected_schedule(&p, image_seq_len);
 
     /* Sample */
     float *latent;
@@ -531,8 +538,8 @@ flux_image *flux_generate_with_embeddings(flux_ctx *ctx,
     int64_t seed = (p.seed < 0) ? (int64_t)time(NULL) : p.seed;
     float *z = flux_init_noise(1, FLUX_LATENT_CHANNELS, latent_h, latent_w, seed);
 
-    /* Get official FLUX.2 schedule (matches Python) */
-    float *schedule = flux_official_schedule(p.num_steps, image_seq_len);
+    /* Get schedule */
+    float *schedule = flux_selected_schedule(&p, image_seq_len);
 
     /* Sample - note: pre-computed embeddings only support distilled path.
      * CFG requires two embeddings which the caller doesn't provide. */
@@ -622,8 +629,8 @@ flux_image *flux_generate_with_embeddings_and_noise(flux_ctx *ctx,
     float *z = (float *)malloc(expected_noise_size * sizeof(float));
     memcpy(z, noise, expected_noise_size * sizeof(float));
 
-    /* Get official FLUX.2 schedule (matches Python) */
-    float *schedule = flux_official_schedule(p.num_steps, image_seq_len);
+    /* Get schedule */
+    float *schedule = flux_selected_schedule(&p, image_seq_len);
 
     /* Sample */
     float *latent = flux_sample_euler(
@@ -782,8 +789,8 @@ flux_image *flux_img2img(flux_ctx *ctx, const char *prompt,
     int num_steps = p.num_steps;
     int image_seq_len = latent_h * latent_w;  /* For schedule calculation */
 
-    /* Use official FLUX.2 schedule */
-    float *schedule = flux_official_schedule(num_steps, image_seq_len);
+    /* Get schedule */
+    float *schedule = flux_selected_schedule(&p, image_seq_len);
 
     /* Initialize target latent with pure noise */
     int64_t seed = (p.seed < 0) ? (int64_t)time(NULL) : p.seed;
@@ -991,7 +998,7 @@ flux_image *flux_multiref(flux_ctx *ctx, const char *prompt,
     int latent_w = p.width / 16;
     int image_seq_len = latent_h * latent_w;
 
-    float *schedule = flux_official_schedule(p.num_steps, image_seq_len);
+    float *schedule = flux_selected_schedule(&p, image_seq_len);
     int64_t seed = (p.seed < 0) ? (int64_t)time(NULL) : p.seed;
     float *z = flux_init_noise(1, FLUX_LATENT_CHANNELS, latent_h, latent_w, seed);
 
@@ -1186,7 +1193,7 @@ flux_image *flux_img2img_debug_py(flux_ctx *ctx, const flux_params *params) {
     int image_seq_len = latent_h * latent_w;
 
     /* Get schedule */
-    float *schedule = flux_official_schedule(p.num_steps, image_seq_len);
+    float *schedule = flux_selected_schedule(&p, image_seq_len);
 
     /* Sample with refs */
     float *latent = flux_sample_euler_with_refs(

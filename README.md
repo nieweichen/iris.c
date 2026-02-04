@@ -158,7 +158,7 @@ Done -> /tmp/flux-.../image-0003.png (ref $2)
 - `$N prompt` - img2img with reference $N
 - `$0 $3 prompt` - multi-reference (combine images)
 
-**Commands:** `!help`, `!save`, `!load`, `!seed`, `!size`, `!steps`, `!guidance`, `!explore`, `!show`, `!quit`
+**Commands:** `!help`, `!save`, `!load`, `!seed`, `!size`, `!steps`, `!guidance`, `!linear`, `!explore`, `!show`, `!quit`
 
 ### Command Line Options
 
@@ -176,6 +176,7 @@ Done -> /tmp/flux-.../image-0003.png (ref $2)
 -s, --steps N         Sampling steps (default: auto, 4 distilled / 50 base)
 -S, --seed N          Random seed for reproducibility
 -g, --guidance N      CFG guidance scale (default: auto, 1.0 distilled / 4.0 base)
+    --linear          Use linear timestep schedule (see below)
     --base            Force base model mode (undistilled, CFG enabled)
 ```
 
@@ -363,6 +364,19 @@ The models differ in inference:
 The model type is autodetected from `model_index.json` in the model directory. Use `--base` to force base model mode if autodetection fails.
 
 **Classifier-Free Guidance (CFG)**: The base model runs the transformer twice per step — once with an empty prompt (unconditioned) and once with the real prompt (conditioned). The final velocity is `v = v_uncond + guidance * (v_cond - v_uncond)`. This makes each step ~2x slower than the distilled model, and the base model needs ~12x more steps, making it roughly 25x slower overall.
+
+## Timestep Schedule
+
+By default, denoising uses a **shifted sigmoid** timestep schedule (matching the official BFL implementation). This schedule concentrates most steps in the high-noise regime and rushes through the detail-forming region near t=0. For the 4 steps distilled model, this is definitely the way to go, and changing scheduler will produce proor results. However, for the base model, it may look extremely unbalanced — for example at 10 steps, the first 5 steps cover only 12% of the denoising trajectory while the last 5 steps cover 88%. Still, the base model works well with this scheduler, but after some testing I decided to add the `--linear` flag in order to switch to a uniform timestep schedule, where each step covers an equal portion of the trajectory. This sometimes produces better results with the **base model**, at least more realistic looking results, especially at reduced step count (10 steps, for instance, which is 1/5 of execution time compared to the default 50 steps), since the linear schedule avoids the huge final steps that the shifted sigmoid creates, and this alters the generation in a significant way, often in interesting ways.
+
+```bash
+# Base model with 10 steps and linear schedule
+./flux -d flux-klein-base-model -p "a cat" -o cat.png -s 10 --linear
+```
+
+In interactive CLI mode, toggle with `!linear`.
+
+Note: for the distilled model (4 steps), the shifted sigmoid schedule is part of the distillation training, so `--linear` is not recommended.
 
 ## Memory Requirements
 
@@ -582,10 +596,11 @@ typedef struct {
     int num_steps;          /* Denoising steps, 0 = auto (4 distilled, 50 base) */
     int64_t seed;           /* Random seed, -1 for random (default: -1) */
     float guidance;         /* CFG guidance scale, 0 = auto (1.0 distilled, 4.0 base) */
+    int linear_schedule;    /* Use linear timestep schedule (0 = shifted sigmoid) */
 } flux_params;
 
 /* Initialize with sensible defaults (auto steps and guidance from model type) */
-#define FLUX_PARAMS_DEFAULT { 256, 256, 0, -1, 0.0f }
+#define FLUX_PARAMS_DEFAULT { 256, 256, 0, -1, 0.0f, 0 }
 ```
 
 ## Debugging
