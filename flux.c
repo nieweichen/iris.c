@@ -143,6 +143,7 @@ struct flux_ctx {
     int is_distilled;  /* 1 = distilled (4-step), 0 = base (50-step CFG) */
     int text_dim;      /* Text embedding dimension (7680 for 4B, varies for 9B) */
     int is_non_commercial; /* 1 if model has non-commercial license (9B) */
+    int num_heads;     /* Transformer attention heads (24 for 4B, 32 for 9B) */
 
     /* Model info */
     char model_name[64];
@@ -243,6 +244,7 @@ flux_ctx *flux_load_dir(const char *model_dir) {
     int hidden_size = num_heads * 128;  /* head_dim is always 128 */
     const char *size_label = (hidden_size > 3072) ? "9B" : "4B";
     ctx->is_non_commercial = (hidden_size > 3072) ? 1 : 0;
+    ctx->num_heads = num_heads;
 
     if (ctx->is_distilled) {
         ctx->default_steps = 4;
@@ -699,6 +701,72 @@ flux_image *flux_generate_with_embeddings_and_noise(flux_ctx *ctx,
 }
 
 /* ========================================================================
+ * Attention Memory Budget
+ * ======================================================================== */
+
+/* 4 GB — MPSTemporaryNDArray hard limit. */
+#define ATTENTION_MAX_BYTES ((size_t)4ULL << 30)
+
+/* Compute worst-case attention matrix size in bytes.
+ * All image dimensions are in pixels (multiples of 16).
+ * ref_dims is [h0, w0, h1, w1, ...] in pixels. */
+static size_t attention_bytes(int num_heads,
+                              int out_h, int out_w,
+                              const int *ref_dims, int num_refs,
+                              int txt_seq)
+{
+    size_t total_seq = (size_t)(out_h / 16) * (out_w / 16);
+    for (int i = 0; i < num_refs; i++)
+        total_seq += (size_t)(ref_dims[i*2] / 16) * (ref_dims[i*2+1] / 16);
+    total_seq += txt_seq;
+    return (size_t)num_heads * total_seq * total_seq * sizeof(float);
+}
+
+/* Shrink reference pixel dimensions so attention fits under 4 GB.
+ * ref_dims: [h0, w0, h1, w1, ...] in pixels, modified in-place.
+ * Returns 1 if any reference was shrunk, 0 if already fits. */
+static int fit_refs_for_attention(int num_heads,
+                                  int out_h, int out_w,
+                                  int *ref_dims, int num_refs,
+                                  int txt_seq)
+{
+    if (attention_bytes(num_heads, out_h, out_w,
+                        ref_dims, num_refs, txt_seq) <= ATTENTION_MAX_BYTES)
+        return 0;
+
+    int shrunk = 0;
+    for (;;) {
+        /* Find reference with the most latent tokens. */
+        int best = -1;
+        size_t best_tok = 0;
+        for (int i = 0; i < num_refs; i++) {
+            size_t tok = (size_t)(ref_dims[i*2] / 16) *
+                         (ref_dims[i*2+1] / 16);
+            if (tok > best_tok) { best_tok = tok; best = i; }
+        }
+        if (best < 0 || best_tok <= 1) break;  /* can't shrink further */
+
+        /* Scale both dimensions by 0.9, round down to multiple of 16. */
+        int h = (int)(ref_dims[best*2] * 0.9f) / 16 * 16;
+        int w = (int)(ref_dims[best*2+1] * 0.9f) / 16 * 16;
+        if (h < 16) h = 16;
+        if (w < 16) w = 16;
+
+        /* No progress — already at minimum. */
+        if (h == ref_dims[best*2] && w == ref_dims[best*2+1]) break;
+
+        ref_dims[best*2]   = h;
+        ref_dims[best*2+1] = w;
+        shrunk = 1;
+
+        if (attention_bytes(num_heads, out_h, out_w,
+                            ref_dims, num_refs, txt_seq) <= ATTENTION_MAX_BYTES)
+            break;
+    }
+    return shrunk;
+}
+
+/* ========================================================================
  * Image-to-Image Generation
  * ======================================================================== */
 
@@ -732,11 +800,25 @@ flux_image *flux_img2img(flux_ctx *ctx, const char *prompt,
     p.width = (p.width / 16) * 16;
     p.height = (p.height / 16) * 16;
 
+    /* Check attention memory budget — shrink reference if needed. */
+    int ref_w = p.width, ref_h = p.height;
+    {
+        int ref_dims[2] = { p.height, p.width };
+        if (fit_refs_for_attention(ctx->num_heads, p.height, p.width,
+                                    ref_dims, 1, FLUX_MAX_SEQ_LEN)) {
+            fprintf(stderr, "Note: reference image resized from %dx%d to %dx%d "
+                    "(GPU attention memory limit)\n",
+                    p.width, p.height, ref_dims[1], ref_dims[0]);
+            ref_h = ref_dims[0];
+            ref_w = ref_dims[1];
+        }
+    }
+
     /* Resize input if needed */
     flux_image *resized = NULL;
     const flux_image *img_to_use = input;
-    if (input->width != p.width || input->height != p.height) {
-        resized = flux_image_resize(input, p.width, p.height);
+    if (input->width != ref_w || input->height != ref_h) {
+        resized = flux_image_resize(input, ref_w, ref_h);
         if (!resized) {
             set_error("Failed to resize input image");
             return NULL;
@@ -790,11 +872,11 @@ flux_image *flux_img2img(flux_ctx *ctx, const char *prompt,
 
     if (ctx->vae) {
         img_latent = flux_vae_encode(ctx->vae, img_tensor, 1,
-                                     p.height, p.width, &latent_h, &latent_w);
+                                     ref_h, ref_w, &latent_h, &latent_w);
     } else {
         /* Placeholder if no VAE */
-        latent_h = p.height / 16;
-        latent_w = p.width / 16;
+        latent_h = ref_h / 16;
+        latent_w = ref_w / 16;
         img_latent = (float *)calloc(FLUX_LATENT_CHANNELS * latent_h * latent_w, sizeof(float));
     }
 
@@ -820,14 +902,16 @@ flux_image *flux_img2img(flux_ctx *ctx, const char *prompt,
      * noise directly to the encoded image.
      */
     int num_steps = p.num_steps;
-    int image_seq_len = latent_h * latent_w;  /* For schedule calculation */
+    int out_lat_h = p.height / 16;
+    int out_lat_w = p.width / 16;
+    int image_seq_len = out_lat_h * out_lat_w;  /* For schedule calculation */
 
     /* Get schedule */
     float *schedule = flux_selected_schedule(&p, image_seq_len);
 
     /* Initialize target latent with pure noise */
     int64_t seed = (p.seed < 0) ? (int64_t)time(NULL) : p.seed;
-    float *z = flux_init_noise(1, FLUX_LATENT_CHANNELS, latent_h, latent_w, seed);
+    float *z = flux_init_noise(1, FLUX_LATENT_CHANNELS, out_lat_h, out_lat_w, seed);
 
     /* Reference image latent is img_latent, with T offset = 10 */
     int t_offset = 10;
@@ -837,7 +921,7 @@ flux_image *flux_img2img(flux_ctx *ctx, const char *prompt,
     if (ctx->is_distilled) {
         latent = flux_sample_euler_with_refs(
             ctx->transformer, ctx->qwen3_encoder,
-            z, 1, FLUX_LATENT_CHANNELS, latent_h, latent_w,
+            z, 1, FLUX_LATENT_CHANNELS, out_lat_h, out_lat_w,
             img_latent, latent_h, latent_w,
             t_offset,
             text_emb, text_seq,
@@ -847,7 +931,7 @@ flux_image *flux_img2img(flux_ctx *ctx, const char *prompt,
     } else {
         latent = flux_sample_euler_cfg_with_refs(
             ctx->transformer, ctx->qwen3_encoder,
-            z, 1, FLUX_LATENT_CHANNELS, latent_h, latent_w,
+            z, 1, FLUX_LATENT_CHANNELS, out_lat_h, out_lat_w,
             img_latent, latent_h, latent_w,
             t_offset,
             text_emb, text_seq,
@@ -873,7 +957,7 @@ flux_image *flux_img2img(flux_ctx *ctx, const char *prompt,
     flux_image *result = NULL;
     if (ctx->vae) {
         if (flux_phase_callback) flux_phase_callback("decoding image", 0);
-        result = flux_vae_decode(ctx->vae, latent, 1, latent_h, latent_w);
+        result = flux_vae_decode(ctx->vae, latent, 1, out_lat_h, out_lat_w);
         if (flux_phase_callback) flux_phase_callback("decoding image", 1);
     }
 
@@ -956,7 +1040,28 @@ flux_image *flux_multiref(flux_ctx *ctx, const char *prompt,
         return NULL;
     }
 
-    /* Encode all reference images at their native sizes */
+    /* Build reference pixel dimensions, clamped and rounded to 16. */
+    int *ref_pixel_dims = (int *)malloc(num_refs * 2 * sizeof(int));
+    for (int i = 0; i < num_refs; i++) {
+        int rh = (refs[i]->height / 16) * 16;
+        int rw = (refs[i]->width / 16) * 16;
+        if (rh > FLUX_VAE_MAX_DIM) rh = FLUX_VAE_MAX_DIM;
+        if (rw > FLUX_VAE_MAX_DIM) rw = FLUX_VAE_MAX_DIM;
+        if (rh < 16) rh = 16;
+        if (rw < 16) rw = 16;
+        ref_pixel_dims[i*2]   = rh;
+        ref_pixel_dims[i*2+1] = rw;
+    }
+
+    /* Shrink references if attention would exceed 4 GB. */
+    if (fit_refs_for_attention(ctx->num_heads, p.height, p.width,
+                                ref_pixel_dims, num_refs, FLUX_MAX_SEQ_LEN)) {
+        fprintf(stderr,
+                "Note: reference images resized to fit GPU attention "
+                "memory limit\n");
+    }
+
+    /* Encode all reference images */
     flux_ref_t *ref_latents = (flux_ref_t *)malloc(num_refs * sizeof(flux_ref_t));
     float **ref_data = (float **)malloc(num_refs * sizeof(float *));
     flux_image **resized_imgs = (flux_image **)calloc(num_refs, sizeof(flux_image *));
@@ -965,15 +1070,10 @@ flux_image *flux_multiref(flux_ctx *ctx, const char *prompt,
         const flux_image *ref = refs[i];
         const flux_image *img_to_use = ref;
 
-        /* Compute native size rounded to multiple of 16 */
-        int ref_w = (ref->width / 16) * 16;
-        int ref_h = (ref->height / 16) * 16;
+        int ref_h = ref_pixel_dims[i*2];
+        int ref_w = ref_pixel_dims[i*2+1];
 
-        /* Clamp to VAE max */
-        if (ref_w > FLUX_VAE_MAX_DIM) ref_w = FLUX_VAE_MAX_DIM;
-        if (ref_h > FLUX_VAE_MAX_DIM) ref_h = FLUX_VAE_MAX_DIM;
-
-        /* Resize only if dimensions changed after rounding/clamping */
+        /* Resize only if dimensions differ from original */
         if (ref->width != ref_w || ref->height != ref_h) {
             resized_imgs[i] = flux_image_resize(ref, ref_w, ref_h);
             if (!resized_imgs[i]) {
@@ -984,6 +1084,7 @@ flux_image *flux_multiref(flux_ctx *ctx, const char *prompt,
                 free(ref_latents);
                 free(ref_data);
                 free(resized_imgs);
+                free(ref_pixel_dims);
                 free(text_emb);
                 free(text_emb_uncond);
                 set_error("Failed to resize reference image");
@@ -1009,6 +1110,7 @@ flux_image *flux_multiref(flux_ctx *ctx, const char *prompt,
             free(ref_latents);
             free(ref_data);
             free(resized_imgs);
+            free(ref_pixel_dims);
             free(text_emb);
             free(text_emb_uncond);
             set_error("Failed to encode reference image");
@@ -1026,6 +1128,7 @@ flux_image *flux_multiref(flux_ctx *ctx, const char *prompt,
         if (resized_imgs[i]) flux_image_free(resized_imgs[i]);
     }
     free(resized_imgs);
+    free(ref_pixel_dims);
 
     int latent_h = p.height / 16;
     int latent_w = p.width / 16;
