@@ -28,25 +28,7 @@
 /* Minimum matrix size to use GPU (smaller matrices are faster on CPU) */
 #define MIN_GPU_ELEMENTS (512 * 512)
 
-/* Fast exponential approximation using range reduction + degree-5 polynomial.
- * Relative error < 2e-6 across the full float range.
- * Compiles to ~10 instructions on ARM/x86, and the compiler can auto-vectorize
- * loops that use this (unlike libm expf which is an opaque function call). */
-static inline float fast_expf(float x) {
-    if (x < -87.3f) return 0.0f;
-    if (x > 88.7f) return 1e38f;
-    /* Range reduction: x = n*ln(2) + r, |r| <= ln(2)/2 */
-    float n = floorf(x * 1.4426950408889634f + 0.5f);
-    float r = x - n * 0.6931471805599453f;
-    /* Degree-5 polynomial: exp(r) for |r| <= ln(2)/2 */
-    float p = 1.0f + r * (1.0f + r * (0.5f + r * (0.16666667f +
-              r * (0.04166667f + r * 0.00833333f))));
-    /* Multiply by 2^n via IEEE 754 exponent manipulation */
-    union { float f; int32_t i; } v;
-    v.f = p;
-    v.i += (int32_t)n << 23;
-    return v.f;
-}
+/* fast_expf is defined in flux_kernels.h */
 
 /* Progress callbacks - set by caller before inference */
 flux_substep_callback_t flux_substep_callback = NULL;
