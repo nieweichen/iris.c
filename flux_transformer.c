@@ -3587,7 +3587,7 @@ float *flux_transformer_forward(flux_transformer_t *tf,
                        1, hidden, double_mod_size);
 
     for (int i = 0; i < tf->num_double_layers; i++) {
-        /* In mmap mode, load block weights on-demand (cached across steps) */
+        /* In mmap mode, load block weights on-demand and free after use */
         if (tf->use_mmap && tf->double_blocks[i].img_q_weight == NULL
                          && tf->double_blocks[i].img_q_weight_bf16 == NULL) {
             load_double_block_weights(&tf->double_blocks[i], tf->sf_files, tf->num_sf_files, i,
@@ -3599,6 +3599,7 @@ float *flux_transformer_forward(flux_transformer_t *tf,
                              img_rope_cos, img_rope_sin,
                              txt_rope_cos, txt_rope_sin,
                              img_seq, txt_seq, tf);
+        if (tf->use_mmap) free_double_block_weights(&tf->double_blocks[i]);
         if (flux_substep_callback)
             flux_substep_callback(FLUX_SUBSTEP_DOUBLE_BLOCK, i, tf->num_double_layers);
 #ifdef DEBUG_TRANSFORMER
@@ -3808,7 +3809,7 @@ float *flux_transformer_forward(flux_transformer_t *tf,
     if (!bf16_path_ok && !gpu_chained_ok) {
 #endif
         for (int i = 0; i < tf->num_single_layers; i++) {
-            /* In mmap mode, load block weights on-demand (cached across steps) */
+            /* In mmap mode, load block weights on-demand and free after use */
             if (tf->use_mmap && tf->single_blocks[i].qkv_mlp_weight == NULL
                              && tf->single_blocks[i].qkv_mlp_weight_bf16 == NULL) {
                 load_single_block_weights(&tf->single_blocks[i], tf->sf_files, tf->num_sf_files, i,
@@ -3830,6 +3831,7 @@ float *flux_transformer_forward(flux_transformer_t *tf,
                                      txt_rope_cos, txt_rope_sin,
                                      total_seq, txt_seq, tf);  /* txt_seq is the offset to image */
             }
+            if (tf->use_mmap) free_single_block_weights(&tf->single_blocks[i]);
             if (flux_substep_callback)
                 flux_substep_callback(FLUX_SUBSTEP_SINGLE_BLOCK, i, tf->num_single_layers);
 
