@@ -1,14 +1,15 @@
 This is a C implementation of the Flux.2 Klein model, an image synthesis model
-created by Black Forest Labs, with 4 billion parameters.
+created by Black Forest Labs, supporting both 4B and 9B parameter variants.
 
-Two model variants are supported:
-- **Distilled** (flux-klein-model): 4 steps, no CFG, fast.
-- **Base** (flux-klein-base-model): 50 steps default, Classifier-Free Guidance (CFG), higher quality but ~25x slower.
+Three model variants are supported:
+- **4B Distilled** (flux-klein-model): 4 steps, no CFG, fast.
+- **4B Base** (flux-klein-base-model): 50 steps default, Classifier-Free Guidance (CFG), higher quality but ~25x slower.
+- **9B Distilled** (flux-klein-9b-model): 4 steps, larger model, higher quality. Non-commercial license.
 
-Both share the same architecture and weight format. The model type is autodetected from `model_index.json` in the model directory (distilled has `"is_distilled": true`, base lacks this field). The `--base` CLI flag can force base mode.
+All share the same architecture (rectified flow transformer) with different dimensions. Architecture parameters are read at runtime from the model's config JSON files (`transformer/config.json` and `text_encoder/config.json`). The model type is autodetected from `model_index.json` and the transformer config. The `--base` CLI flag can force base mode.
 
 - The model works both in txt2img mode than in img2img mode with text conditioning.
-- The text embedding is created via Qwen3 4B.
+- The text embedding is created via Qwen3 (4B for the 4B model, 8B for the 9B model).
 - The conditioning images, that can be more than one, are VAE-encoded and concatenated with the text embeddings.
 
 For deeper technical details, see the "Implementation Details" section at the bottom.
@@ -39,10 +40,10 @@ main.c                  - CLI entry point
 # Pipeline Overview
 
 ```
-1. Text Encoding:    prompt → Qwen3 → [512, 7680] embeddings
+1. Text Encoding:    prompt → Qwen3 → [512, text_dim] embeddings (text_dim=7680 for 4B, 12288 for 9B)
 2. Latent Init:      random noise [H/16, W/16, 128]
 3. Denoising Loop (4 steps distilled, 50 steps base):
-   └─ per step: 5 double blocks → 20 single blocks → final layer → velocity
+   └─ per step: double blocks → single blocks → final layer → velocity
 4. VAE Decode:       latents → VAE decoder → RGB image
 
 img2img: Reference images are VAE-encoded and passed as extra tokens (not noise).
@@ -56,9 +57,15 @@ are run sequentially (not batched).
 
 # Key Architecture Constants
 
-Transformer: hidden=3072, heads=24, head_dim=128, mlp=9216, double_blocks=5, single_blocks=20, latent_ch=128
+These are now read at runtime from the model's config JSON files. Reference values:
 
-Qwen3: hidden=2560, q_heads=32, kv_heads=8 (GQA 4:1), layers=36, output_dim=7680 (3×2560)
+4B Transformer: hidden=3072, heads=24, head_dim=128, mlp=9216, double_blocks=5, single_blocks=20, text_dim=7680
+9B Transformer: hidden=4096, heads=32, head_dim=128, mlp=12288, double_blocks=8, single_blocks=24, text_dim=12288
+
+4B Qwen3: hidden=2560, q_heads=32, kv_heads=8 (GQA 4:1), layers=36, output_dim=7680 (3×2560)
+9B Qwen3: hidden=4096, q_heads=32, kv_heads=8 (GQA 4:1), layers=36, output_dim=12288 (3×4096)
+
+Shared: latent_ch=128, head_dim=128, VAE architecture identical across all models.
 
 # Critical Implementation Details
 
@@ -93,8 +100,9 @@ This project implements three different targets:
 
     ./flux2 -d flux-klein-model -p "a cat and a dog playing" -o /tmp/test.png
     ./flux2 -d flux-klein-base-model -p "a cat and a dog playing" -o /tmp/test.png
+    ./flux2 -d flux-klein-9b-model -p "a cat and a dog playing" -o /tmp/test.png
 
-You have your weights ready in `flux-klein-model` (distilled) and `flux-klein-base-model` (base). If you can't find them, there is a download script (`--base` for the base model), but before using it ask the user.
+You have your weights ready in `flux-klein-model` (distilled), `flux-klein-base-model` (base), and `flux-klein-9b-model` (9B distilled). If you can't find them, there is a download script (`--base` for the base model, `--9b` for the 9B model), but before using it ask the user.
 
 # Where to find the reference implementation in Python
 
@@ -131,7 +139,7 @@ Token types:
 
 1. Input timestep scaled by 1000 (t=1.0 → 1000.0)
 2. Sinusoidal embedding: 128 frequencies → 256 dims
-3. MLP: linear(256→3072) + SiLU + linear(3072→3072)
+3. MLP: linear(256→hidden) + SiLU + linear(hidden→hidden)
 
 # Text Encoder (Qwen3)
 
@@ -146,7 +154,7 @@ Chat template format:
 
 ```
 
-Layer extraction: outputs from layers 8, 17, 26 (0-indexed) are concatenated → [seq, 7680]
+Layer extraction: outputs from layers 8, 17, 26 (0-indexed) are concatenated → [seq, 3*hidden] (7680 for 4B, 12288 for 9B)
 
 # VAE
 
@@ -159,7 +167,7 @@ Channel multipliers: [1, 2, 4, 4] → [128, 256, 512, 512]
 
 # Double Block Flow
 
-Input: img_hidden [img_seq, 3072], txt_hidden [txt_seq, 3072]
+Input: img_hidden [img_seq, hidden], txt_hidden [txt_seq, hidden]
 
 1. AdaLN normalize both streams (shift1, scale1)
 2. Separate Q, K, V projections for each stream

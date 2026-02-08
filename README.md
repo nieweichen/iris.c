@@ -1,11 +1,12 @@
-# FLUX.2-klein-4B Pure C Implementation
+# FLUX.2-klein Pure C Implementation
 
-This program generates images from text prompts (and optionally from other images) using the [FLUX.2-klein-4B model](https://bfl.ai/models/flux-2-klein) from [Black Forest Labs](https://bfl.ai/). It can be used as a library as well, and is implemented entirely in C, with zero external dependencies beyond the C standard library. MPS and BLAS acceleration are optional but recommended.
+This program generates images from text prompts (and optionally from other images) using the [FLUX.2-klein models](https://bfl.ai/models/flux-2-klein) from [Black Forest Labs](https://bfl.ai/). It can be used as a library as well, and is implemented entirely in C, with zero external dependencies beyond the C standard library. MPS and BLAS acceleration are optional but recommended.
 
 Supported models:
 
-- Flux.2 4B Klein distilled model (4 steps, auto guidance set to 1, very fast).
-- Flux.2 4B Klein base model. (50 steps for max quality, or less. Classifier-Free Diffusion Guidance, much slower but more generation variety).
+- **Flux.2 Klein 4B distilled** (4 steps, auto guidance set to 1, very fast).
+- **Flux.2 Klein 4B base** (50 steps for max quality, or less. Classifier-Free Diffusion Guidance, much slower but more generation variety).
+- **Flux.2 Klein 9B distilled** (4 steps, larger model, higher quality. Non-commercial license).
 
 ## Quick Start
 
@@ -30,6 +31,17 @@ If you want to try the base model, instead of the distilled one (much slower, hi
 ./flux -d flux-klein-base-model -p "A woman wearing sunglasses" -o output.png
 ```
 
+If you want to try the 9B model (higher quality, non-commercial license, ~30GB download):
+```bash
+# 9B is a gated model - you need a HuggingFace token
+# 1. Accept the license at https://huggingface.co/black-forest-labs/FLUX.2-klein-9B
+# 2. Get your token from https://huggingface.co/settings/tokens
+./download_model.sh --9b --token YOUR_TOKEN
+# or: python download_model.py --9b --token YOUR_TOKEN
+# or: set HF_TOKEN env var, or save token to hf_token.txt
+./flux -d flux-klein-9b-model -p "A woman wearing sunglasses" -o output.png
+```
+
 That's it. No Python runtime or CUDA toolkit required at inference time.
 
 ## Example Output
@@ -52,8 +64,8 @@ That's it. No Python runtime or CUDA toolkit required at inference time.
 - **Text-to-image**: Generate images from text prompts
 - **Image-to-image**: Transform existing images guided by prompts
 - **Multi-reference**: Combine multiple reference images (e.g., `-i car.png -i beach.png` for "car on beach")
-- **Integrated text encoder**: Qwen3-4B encoder built-in, no external embedding computation needed
-- **Memory efficient**: Automatic encoder release after encoding (~8GB freed)
+- **Integrated text encoder**: Qwen3 encoder built-in (4B or 8B depending on model), no external embedding computation needed
+- **Memory efficient**: Automatic encoder release after encoding (up to ~16GB freed)
 - **Memory-mapped weights**: Enabled by default. Reduces peak memory from ~16GB to ~4-5GB. Fastest mode on MPS; BLAS users with plenty of RAM may prefer `--no-mmap` for faster inference
 - **Size-independent seeds**: Same seed produces similar compositions at different resolutions. Explore at 256×256, then render at 512×512 with the same seed
 - **Terminal image display**: watch the resulting image without leaving your terminal (Ghostty, Kitty, iTerm2, or Konsole).
@@ -200,6 +212,7 @@ Done -> /tmp/flux-.../image-0003.png (ref $2)
 ```
 -m, --mmap            Memory-mapped weights (default, fastest on MPS)
     --no-mmap         Disable mmap, load all weights upfront
+    --no-license-info Suppress non-commercial license warning (9B model)
 -e, --embeddings PATH Load pre-computed text embeddings (advanced)
 -h, --help            Show help
 ```
@@ -236,7 +249,7 @@ identify -verbose image.png | grep -A1 "Properties:"
 
 The following metadata fields are stored:
 - `flux:seed` - The random seed used for generation
-- `flux:model` - The model name (FLUX.2-klein-4B)
+- `flux:model` - The model name (e.g., FLUX.2-klein-4B, FLUX.2-klein-9B)
 - `Software` - Program identifier
 
 ## Building
@@ -300,23 +313,34 @@ python3 run_test.py --flux-binary ./flux --model-dir /path/to/model
 
 Download model weights from HuggingFace using one of these methods:
 
-**Distilled model** (~16GB, fast 4-step inference):
+**4B Distilled model** (~16GB, fast 4-step inference):
 ```bash
 ./download_model.sh                      # using curl
 # or: python download_model.py           # using huggingface_hub
 ```
 
-**Base model** (~16GB, 50-step inference with CFG, higher quality):
+**4B Base model** (~16GB, 50-step inference with CFG, higher quality):
 ```bash
 ./download_model.sh --base
 # or: python download_model.py --base
 ```
 
-The distilled model downloads to `./flux-klein-model`, the base model to `./flux-klein-base-model`. Both contain:
-- VAE (~300MB)
-- Transformer (~4GB)
-- Qwen3-4B Text Encoder (~8GB)
-- Tokenizer
+**9B Distilled model** (~30GB, higher quality, non-commercial license):
+```bash
+# Gated model - requires HuggingFace authentication
+# 1. Accept the license at https://huggingface.co/black-forest-labs/FLUX.2-klein-9B
+# 2. Get a token from https://huggingface.co/settings/tokens
+./download_model.sh --9b --token YOUR_TOKEN
+# or: python download_model.py --9b --token YOUR_TOKEN
+# You can also set the HF_TOKEN environment variable or save
+# the token to hf_token.txt in the repo root.
+```
+
+| Model | Directory | Size | Components |
+|-------|-----------|------|------------|
+| 4B distilled | `./flux-klein-model` | ~16GB | VAE (~300MB), Transformer (~4GB), Qwen3-4B (~8GB) |
+| 4B base | `./flux-klein-base-model` | ~16GB | VAE (~300MB), Transformer (~4GB), Qwen3-4B (~8GB) |
+| 9B distilled | `./flux-klein-9b-model` | ~30GB | VAE (~300MB), Transformer (~17GB), Qwen3-8B (~15GB) |
 
 ## How Fast Is It?
 
@@ -361,15 +385,21 @@ Dimensions should be multiples of 16 (the VAE downsampling factor).
 
 ## Model Architecture
 
-Both models share the same architecture, a rectified flow transformer:
+All models share the same rectified flow transformer architecture, differing only in dimensions:
 
-| Component | Architecture |
-|-----------|-------------|
-| Transformer | 5 double blocks + 20 single blocks, 3072 hidden dim, 24 attention heads |
-| VAE | AutoencoderKL, 128 latent channels, 8x spatial compression |
-| Text Encoder | Qwen3-4B, 36 layers, 2560 hidden dim |
+| Component | 4B | 9B |
+|-----------|-----|-----|
+| Transformer hidden | 3072 | 4096 |
+| Attention heads | 24 | 32 |
+| Head dim | 128 | 128 |
+| Double blocks | 5 | 8 |
+| Single blocks | 20 | 24 |
+| Text Encoder | Qwen3-4B (2560 hidden, 36 layers) | Qwen3-8B (4096 hidden, 36 layers) |
+| VAE | AutoencoderKL, 128 latent channels, 8x spatial compression | Same |
 
-The models differ in inference:
+Architecture dimensions are read automatically from the model's config JSON files at load time.
+
+The distilled and base variants differ in inference:
 
 | | Distilled | Base |
 |---|-----------|------|
@@ -377,7 +407,7 @@ The models differ in inference:
 | CFG guidance | 1.0 (none) | 4.0 (default) |
 | Passes per step | 1 | 2 (conditioned + unconditioned) |
 
-The model type is autodetected from `model_index.json` in the model directory. Use `--base` to force base model mode if autodetection fails.
+The model type (distilled vs base, 4B vs 9B) is autodetected from the model directory. Use `--base` to force base model mode if autodetection fails.
 
 **Classifier-Free Guidance (CFG)**: The base model runs the transformer twice per step — once with an empty prompt (unconditioned) and once with the real prompt (conditioned). The final velocity is `v = v_uncond + guidance * (v_cond - v_uncond)`. This makes each step ~2x slower than the distilled model, and the base model needs ~12x more steps, making it roughly 25x slower overall.
 
@@ -412,6 +442,8 @@ If you have a terminal supporting the iTerm2 or Kitty terminal graphics protocol
 
 ## Memory Requirements
 
+### 4B model
+
 With mmap (default):
 
 | Phase | Memory |
@@ -427,6 +459,24 @@ With `--no-mmap` (all weights in RAM):
 | Text encoding | ~8GB (encoder weights) |
 | Diffusion | ~8GB (transformer ~4GB + VAE ~300MB + activations) |
 | Peak | ~16GB (if encoder not released) |
+
+### 9B model
+
+With mmap (default):
+
+| Phase | Memory |
+|-------|--------|
+| Text encoding | ~3-4GB (larger layers loaded on-demand) |
+| Diffusion | ~2-3GB (more/larger blocks loaded on-demand) |
+| Peak | ~8-10GB |
+
+With `--no-mmap` (all weights in RAM):
+
+| Phase | Memory |
+|-------|--------|
+| Text encoding | ~15GB (Qwen3-8B encoder weights) |
+| Diffusion | ~17GB (transformer ~17GB + VAE ~300MB + activations) |
+| Peak | ~32GB (if encoder not released) |
 
 The text encoder is automatically released after encoding, reducing peak memory during diffusion. If you generate multiple images with different prompts, the encoder reloads automatically.
 
