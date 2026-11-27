@@ -921,3 +921,17 @@ INFO  [TaskExecutor] Waiting for 12 active tasks to complete...
 INFO  [DataSource] Closed connection pool.
 INFO  [Main] iris.c stopped cleanly in 8 seconds.
 ```
+
+
+## Glossary
+
+| Term | Definition |
+|------|------------|
+| **Aggregate** | Cluster of domain entities treated as one unit |
+| **Repository** | Data access abstraction — Spring Data interface |
+| **DTO** | Data Transfer Object — shape for API I/O |
+| **Entity** | Persistent domain object (JPA `@Entity`) |
+| **Service** | Business logic layer |
+| **Controller** | HTTP endpoint handler |
+| **Persistence** | Database/storage concerns |
+| **Projection** | Optimized read model for specific queries |
