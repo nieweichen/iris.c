@@ -888,3 +888,36 @@ The `debug/` directory contains Python scripts for comparing C and Python implem
 ## License
 
 MIT
+
+
+## Graceful Shutdown
+
+iris.c supports clean shutdown — critical for rolling deploys.
+
+### What happens on SIGTERM
+1. Stop accepting new connections (Tomcat connector paused)
+2. Finish in-flight requests (max 60s)
+3. Close connection pool (return active connections)
+4. Flush logs
+5. Close Spring context
+
+### Custom shutdown hook
+```java
+@Component
+public class CleanupShutdown implements DisposableBean {
+    @Override
+    public void destroy() throws Exception {
+        // Close Kafka consumer, flush MQ, etc.
+        externalService.shutdownGracefully();
+    }
+}
+```
+
+### Verify
+Send SIGTERM to a running instance — you should see:
+```
+INFO  [ShutdownHook] Shutting down iris.c...
+INFO  [TaskExecutor] Waiting for 12 active tasks to complete...
+INFO  [DataSource] Closed connection pool.
+INFO  [Main] iris.c stopped cleanly in 8 seconds.
+```
